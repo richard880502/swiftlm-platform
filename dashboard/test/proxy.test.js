@@ -51,6 +51,7 @@ test("dashboard generation is fully persisted after the browser disconnects", as
   const address = upstream.address();
   const response = new DisconnectingResponse();
   let persisted;
+  const progress = [];
   await streamDashboardChat({
     config: {
       upstreamBaseUrl: `http://127.0.0.1:${address.port}`,
@@ -58,6 +59,7 @@ test("dashboard generation is fully persisted after the browser disconnects", as
     },
     requestBody: { messages: [] },
     response,
+    onProgress: ({ assistant }) => progress.push(assistant),
     onComplete: async (result) => {
       persisted = result;
       return { ok: true };
@@ -66,6 +68,7 @@ test("dashboard generation is fully persisted after the browser disconnects", as
 
   assert.equal(response.statusCode, 200);
   assert.equal(response.writes.length, 1);
+  assert.deepEqual(progress, ["保", "保存"]);
   assert.equal(persisted.assistant, "保存");
   assert.equal(persisted.completed, true);
 });

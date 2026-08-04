@@ -25,7 +25,7 @@ export async function upstreamJson(config, path, body, { signal } = {}) {
   return { response, data, text };
 }
 
-export async function streamDashboardChat({ config, requestBody, response, onComplete }) {
+export async function streamDashboardChat({ config, requestBody, response, onProgress, onComplete }) {
   let clientConnected = true;
   let completionAttempted = false;
   response.on("close", () => {
@@ -64,6 +64,7 @@ export async function streamDashboardChat({ config, requestBody, response, onCom
   let buffer = "";
   let assistant = "";
   let usage = null;
+  let lastPersistedAssistant = "";
 
   const canWrite = () => clientConnected && !response.writableEnded && !response.destroyed;
   const emitData = (data) => {
@@ -74,7 +75,12 @@ export async function streamDashboardChat({ config, requestBody, response, onCom
     completionAttempted = true;
     return onComplete({ assistant, usage, completed });
   };
-  const consumeEvent = (eventText) => {
+  const persistProgress = async () => {
+    if (!onProgress || assistant === lastPersistedAssistant) return;
+    lastPersistedAssistant = assistant;
+    await onProgress({ assistant, usage });
+  };
+  const consumeEvent = async (eventText) => {
     const data = eventText
       .split("\n")
       .filter((line) => line.startsWith("data:"))
@@ -90,6 +96,7 @@ export async function streamDashboardChat({ config, requestBody, response, onCom
       emitData(JSON.stringify({ choices: [{ delta: { content: data } }] }));
       assistant += data;
     }
+    await persistProgress();
   };
 
   try {
@@ -99,12 +106,12 @@ export async function streamDashboardChat({ config, requestBody, response, onCom
       buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
       let boundary;
       while ((boundary = buffer.indexOf("\n\n")) >= 0) {
-        consumeEvent(buffer.slice(0, boundary));
+        await consumeEvent(buffer.slice(0, boundary));
         buffer = buffer.slice(boundary + 2);
       }
     }
     buffer += decoder.decode();
-    if (buffer.trim()) consumeEvent(buffer);
+    if (buffer.trim()) await consumeEvent(buffer);
     const saved = await persistCompletion(true);
     if (canWrite()) response.write(`event: dashboard\ndata: ${JSON.stringify(saved)}\n\n`);
     emitData("[DONE]");

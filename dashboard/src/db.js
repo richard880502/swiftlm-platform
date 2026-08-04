@@ -95,6 +95,9 @@ export function createStore(databasePath) {
       INSERT INTO messages(id, conversation_id, role, content, created_at)
       VALUES (?, ?, ?, ?, ?)
     `),
+    updateMessageContent: db.prepare(`
+      UPDATE messages SET content = ? WHERE id = ?
+    `),
     updateConversation: db.prepare(`
       UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?
     `),
@@ -152,6 +155,11 @@ export function createStore(databasePath) {
       statements.insertMessage.run(id, conversationId, role, content, timestamp);
       statements.touchConversation.run(timestamp, conversationId);
       return { id, conversation_id: conversationId, role, content, created_at: timestamp };
+    },
+    updateMessageContent(id, conversationId, content) {
+      const result = statements.updateMessageContent.run(content, id);
+      if (result.changes > 0) statements.touchConversation.run(now(), conversationId);
+      return result.changes > 0;
     },
     setConversationTitle(id, title) {
       statements.updateConversation.run(title, now(), id);

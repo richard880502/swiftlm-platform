@@ -206,14 +206,20 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
       temperature: Math.min(Math.max(Number(req.body?.temperature) || 0.7, 0), 2),
       enable_thinking: Boolean(req.body?.enable_thinking),
     };
+    // Store one assistant row up front so streamed text survives a browser refresh.
+    const assistantMessage = store.addMessage(conversation.id, "assistant", "");
     const started = Date.now();
 
     await streamDashboardChat({
       config,
       requestBody,
       response: res,
+      onProgress: ({ assistant }) => {
+        store.updateMessageContent(assistantMessage.id, conversation.id, assistant);
+      },
       onComplete: ({ assistant, usage, completed = true }) => {
-        const message = store.addMessage(conversation.id, "assistant", assistant);
+        store.updateMessageContent(assistantMessage.id, conversation.id, assistant);
+        const message = { ...assistantMessage, content: assistant };
         store.recordRequest({
           route: "/api/conversations/:id/messages",
           model: config.modelId,
