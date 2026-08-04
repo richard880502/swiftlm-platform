@@ -26,6 +26,12 @@ export async function upstreamJson(config, path, body, { signal } = {}) {
 }
 
 export async function streamDashboardChat({ config, requestBody, response, onComplete }) {
+  let clientConnected = true;
+  let completionAttempted = false;
+  response.on("close", () => {
+    clientConnected = false;
+  });
+
   const upstream = await fetch(`${config.upstreamBaseUrl}/chat/completions`, {
     method: "POST",
     headers: {
@@ -37,17 +43,21 @@ export async function streamDashboardChat({ config, requestBody, response, onCom
 
   if (!upstream.ok || !upstream.body) {
     const text = await upstream.text();
-    response.status(upstream.status || 502).json({
-      error: { message: text || "SwiftLM upstream unavailable" },
-    });
+    if (clientConnected) {
+      response.status(upstream.status || 502).json({
+        error: { message: text || "SwiftLM upstream unavailable" },
+      });
+    }
     return;
   }
 
-  response.status(200);
-  response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  response.setHeader("Cache-Control", "no-cache, no-transform");
-  response.setHeader("Connection", "keep-alive");
-  response.flushHeaders();
+  if (clientConnected) {
+    response.status(200);
+    response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    response.setHeader("Cache-Control", "no-cache, no-transform");
+    response.setHeader("Connection", "keep-alive");
+    response.flushHeaders();
+  }
 
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder();
@@ -55,7 +65,15 @@ export async function streamDashboardChat({ config, requestBody, response, onCom
   let assistant = "";
   let usage = null;
 
-  const emitData = (data) => response.write(`data: ${data}\n\n`);
+  const canWrite = () => clientConnected && !response.writableEnded && !response.destroyed;
+  const emitData = (data) => {
+    if (canWrite()) response.write(`data: ${data}\n\n`);
+  };
+  const persistCompletion = async (completed) => {
+    if (completionAttempted || !assistant.trim()) return null;
+    completionAttempted = true;
+    return onComplete({ assistant, usage, completed });
+  };
   const consumeEvent = (eventText) => {
     const data = eventText
       .split("\n")
@@ -87,13 +105,20 @@ export async function streamDashboardChat({ config, requestBody, response, onCom
     }
     buffer += decoder.decode();
     if (buffer.trim()) consumeEvent(buffer);
-    const saved = await onComplete({ assistant, usage });
-    response.write(`event: dashboard\ndata: ${JSON.stringify(saved)}\n\n`);
+    const saved = await persistCompletion(true);
+    if (canWrite()) response.write(`event: dashboard\ndata: ${JSON.stringify(saved)}\n\n`);
     emitData("[DONE]");
-    response.end();
+    if (canWrite()) response.end();
   } catch (error) {
-    response.write(`event: error\ndata: ${JSON.stringify({ message: error.message })}\n\n`);
-    response.end();
+    try {
+      await persistCompletion(false);
+    } catch {
+      // Preserve the original streaming error for the connected client.
+    }
+    if (canWrite()) {
+      response.write(`event: error\ndata: ${JSON.stringify({ message: error.message })}\n\n`);
+      response.end();
+    }
   }
 }
 

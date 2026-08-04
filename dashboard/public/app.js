@@ -4,6 +4,7 @@ const state = {
   currentView: "chat",
   sending: false,
   query: "",
+  generationPollTimer: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -131,6 +132,10 @@ async function showApp() {
   elements.appView.classList.remove("hidden");
   await Promise.all([loadConversations(), refreshStatus()]);
   switchView("chat");
+  const lastConversationId = localStorage.getItem("swiftlm:lastConversation");
+  if (lastConversationId && state.conversations.some(({ id }) => id === lastConversationId)) {
+    await selectConversation(lastConversationId);
+  }
 }
 
 async function refreshStatus() {
@@ -191,22 +196,67 @@ async function createConversation() {
 }
 
 async function selectConversation(id) {
+  stopGenerationPolling();
   state.current = await request(`/api/conversations/${id}`);
+  localStorage.setItem("swiftlm:lastConversation", state.current.id);
   switchView("chat", { preserveTitle: true });
   elements.emptyState.classList.add("hidden");
   elements.chatView.classList.remove("hidden");
-  elements.viewTitle.textContent = state.current.title;
-  elements.viewDescription.textContent = `${state.current.messages.length} 則訊息 · 更新於 ${formatDate(state.current.updated_at)}`;
-  elements.deleteConversationButton.classList.remove("hidden");
+  updateConversationHeader();
   renderConversationList();
   renderMessages();
+  scheduleGenerationPolling();
+}
+
+function updateConversationHeader() {
+  const busy = state.sending || state.current.generation_in_progress;
+  elements.viewTitle.textContent = state.current.title;
+  elements.viewDescription.textContent = state.current.generation_in_progress
+    ? "模型仍在生成 · 完成後會自動更新"
+    : `${state.current.messages.length} 則訊息 · 更新於 ${formatDate(state.current.updated_at)}`;
+  elements.deleteConversationButton.classList.remove("hidden");
+  elements.deleteConversationButton.disabled = busy;
+  elements.sendButton.disabled = busy;
+  elements.messageInput.disabled = busy;
+}
+
+function stopGenerationPolling() {
+  clearTimeout(state.generationPollTimer);
+  state.generationPollTimer = null;
+}
+
+function scheduleGenerationPolling() {
+  stopGenerationPolling();
+  if (!state.current?.generation_in_progress) return;
+  const conversationId = state.current.id;
+  state.generationPollTimer = setTimeout(async () => {
+    if (state.current?.id !== conversationId) return;
+    try {
+      const updated = await request(`/api/conversations/${conversationId}`);
+      if (state.current?.id !== conversationId) return;
+      const wasGenerating = state.current.generation_in_progress;
+      state.current = updated;
+      updateConversationHeader();
+      renderMessages();
+      await loadConversations();
+      if (updated.generation_in_progress) {
+        scheduleGenerationPolling();
+      } else if (wasGenerating) {
+        showToast("回答已完成");
+      }
+    } catch {
+      scheduleGenerationPolling();
+    }
+  }, 1500);
 }
 
 async function deleteCurrentConversation() {
-  if (!state.current || state.sending) return;
+  if (!state.current || state.sending || state.current.generation_in_progress) return;
   const title = state.current.title;
   if (!confirm(`確定刪除「${title}」？\n\n這個對話與其中的訊息將永久刪除。`)) return;
   await request(`/api/conversations/${state.current.id}`, { method: "DELETE" });
+  localStorage.removeItem("swiftlm:lastConversation");
+  stopGenerationPolling();
   state.current = null;
   elements.chatView.classList.add("hidden");
   elements.emptyState.classList.remove("hidden");
@@ -217,16 +267,20 @@ async function deleteCurrentConversation() {
 }
 
 function renderMessages() {
-  elements.messageList.innerHTML = state.current.messages
+  const messages = state.current.messages
     .map((message) => messageHtml(message))
     .join("");
+  const recovering = state.current.generation_in_progress && !state.sending
+    ? messageHtml({ role: "assistant", content: "模型仍在生成，重新整理不會中斷回答…" }, true, "recoveringAssistant")
+    : "";
+  elements.messageList.innerHTML = messages + recovering;
   scrollMessages();
 }
 
-function messageHtml(message, pending = false) {
+function messageHtml(message, pending = false, id = pending ? "pendingAssistant" : "") {
   const isUser = message.role === "user";
   return `
-    <article class="message ${message.role} ${pending ? "pending" : ""}" ${pending ? 'id="pendingAssistant"' : ""}>
+    <article class="message ${message.role} ${pending ? "pending" : ""}" ${id ? `id="${id}"` : ""}>
       <div class="message-avatar" aria-hidden="true">${isUser ? "你" : "S"}</div>
       <div class="message-body">
         <div class="message-meta"><strong>${isUser ? "你" : "SwiftLM"}</strong><span>${isUser ? "剛剛" : "本機模型"}</span></div>
@@ -248,9 +302,10 @@ function resizeComposer() {
 async function sendMessage(event) {
   event.preventDefault();
   const content = elements.messageInput.value.trim();
-  if (!content || !state.current || state.sending) return;
+  if (!content || !state.current || state.sending || state.current.generation_in_progress) return;
 
   state.sending = true;
+  state.current.generation_in_progress = true;
   elements.sendButton.disabled = true;
   elements.deleteConversationButton.disabled = true;
   elements.messageInput.value = "";
@@ -314,14 +369,17 @@ async function sendMessage(event) {
     pending.classList.remove("pending");
     await loadConversations(state.current.id);
   } catch (error) {
+    state.current.generation_in_progress = false;
     pending.classList.remove("pending");
     output.textContent = `請求失敗：${error.message}`;
     await refreshStatus();
   } finally {
     state.sending = false;
-    elements.sendButton.disabled = false;
-    elements.deleteConversationButton.disabled = false;
-    elements.messageInput.focus();
+    const stillGenerating = Boolean(state.current?.generation_in_progress);
+    elements.sendButton.disabled = stillGenerating;
+    elements.deleteConversationButton.disabled = stillGenerating;
+    elements.messageInput.disabled = stillGenerating;
+    if (!stillGenerating) elements.messageInput.focus();
   }
 }
 
@@ -443,6 +501,7 @@ elements.loginForm.addEventListener("submit", async (event) => {
 
 elements.logoutButton.addEventListener("click", async () => {
   await request("/api/auth/logout", { method: "POST" });
+  stopGenerationPolling();
   state.current = null;
   showLogin();
 });

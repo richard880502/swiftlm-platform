@@ -19,6 +19,7 @@ const store = createStore(config.databasePath);
 const app = express();
 const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public");
 const loginAttempts = new Map();
+const activeGenerations = new Set();
 
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
@@ -167,7 +168,9 @@ app.post("/api/conversations", requireAdmin, (req, res) => {
 
 app.get("/api/conversations/:id", requireAdmin, (req, res) => {
   const conversation = store.getConversation(req.params.id);
-  res.status(conversation ? 200 : 404).json(conversation || { error: { message: "Not found" } });
+  res.status(conversation ? 200 : 404).json(conversation
+    ? { ...conversation, generation_in_progress: activeGenerations.has(conversation.id) }
+    : { error: { message: "Not found" } });
 });
 
 app.delete("/api/conversations/:id", requireAdmin, (req, res) => {
@@ -178,47 +181,55 @@ app.delete("/api/conversations/:id", requireAdmin, (req, res) => {
 app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
   const conversation = store.getConversation(req.params.id);
   if (!conversation) return res.status(404).json({ error: { message: "Conversation not found" } });
+  if (activeGenerations.has(conversation.id)) {
+    return res.status(409).json({ error: { message: "A response is already being generated" } });
+  }
 
   const content = String(req.body?.content || "").trim();
   if (!content) return res.status(400).json({ error: { message: "Message is required" } });
   if (content.length > 200_000) return res.status(413).json({ error: { message: "Message too large" } });
 
-  store.addMessage(conversation.id, "user", content);
-  if (conversation.messages.length === 0 && conversation.title === "新對話") {
-    store.setConversationTitle(conversation.id, content.replace(/\s+/g, " ").slice(0, 36));
-  }
-  const updated = store.getConversation(conversation.id);
-  const requestBody = {
-    model: config.modelId,
-    messages: [
-      { role: "system", content: updated.system_prompt },
-      ...updated.messages.map(({ role, content: messageContent }) => ({ role, content: messageContent })),
-    ],
-    max_tokens: Math.min(Math.max(Number(req.body?.max_tokens) || 2048, 1), 32768),
-    temperature: Math.min(Math.max(Number(req.body?.temperature) || 0.7, 0), 2),
-    enable_thinking: Boolean(req.body?.enable_thinking),
-  };
-  const started = Date.now();
+  activeGenerations.add(conversation.id);
+  try {
+    store.addMessage(conversation.id, "user", content);
+    if (conversation.messages.length === 0 && conversation.title === "新對話") {
+      store.setConversationTitle(conversation.id, content.replace(/\s+/g, " ").slice(0, 36));
+    }
+    const updated = store.getConversation(conversation.id);
+    const requestBody = {
+      model: config.modelId,
+      messages: [
+        { role: "system", content: updated.system_prompt },
+        ...updated.messages.map(({ role, content: messageContent }) => ({ role, content: messageContent })),
+      ],
+      max_tokens: Math.min(Math.max(Number(req.body?.max_tokens) || 2048, 1), 32768),
+      temperature: Math.min(Math.max(Number(req.body?.temperature) || 0.7, 0), 2),
+      enable_thinking: Boolean(req.body?.enable_thinking),
+    };
+    const started = Date.now();
 
-  await streamDashboardChat({
-    config,
-    requestBody,
-    response: res,
-    onComplete: ({ assistant, usage }) => {
-      const message = store.addMessage(conversation.id, "assistant", assistant);
-      store.recordRequest({
-        route: "/api/conversations/:id/messages",
-        model: config.modelId,
-        status: 200,
-        latencyMs: Date.now() - started,
-        promptTokens: usage?.prompt_tokens,
-        completionTokens: usage?.completion_tokens,
-        requestPreview: preview({ content, settings: req.body }),
-        responsePreview: preview(assistant),
-      });
-      return { message, usage };
-    },
-  });
+    await streamDashboardChat({
+      config,
+      requestBody,
+      response: res,
+      onComplete: ({ assistant, usage, completed = true }) => {
+        const message = store.addMessage(conversation.id, "assistant", assistant);
+        store.recordRequest({
+          route: "/api/conversations/:id/messages",
+          model: config.modelId,
+          status: completed ? 200 : 502,
+          latencyMs: Date.now() - started,
+          promptTokens: usage?.prompt_tokens,
+          completionTokens: usage?.completion_tokens,
+          requestPreview: preview({ content, settings: req.body }),
+          responsePreview: preview(assistant),
+        });
+        return { message, usage };
+      },
+    });
+  } finally {
+    activeGenerations.delete(conversation.id);
+  }
 });
 
 app.get("/api/activity", requireAdmin, (req, res) => {
