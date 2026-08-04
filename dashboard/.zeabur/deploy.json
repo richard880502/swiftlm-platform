@@ -1,0 +1,15 @@
+{
+  "method": "local",
+  "workspace": null,
+  "projectId": "6a716524a407df8e409a1ed6",
+  "serviceId": "6a716550a407df8e409a1eef",
+  "environmentId": "6a7165245f062718bc7b2ae4",
+  "environment": "staging",
+  "git": {
+    "connected": false,
+    "remote": null,
+    "branch": null
+  },
+  "dockerImage": null,
+  "templateFile": null
+}

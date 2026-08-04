@@ -1,0 +1,57 @@
+#!/bin/zsh
+
+SCRIPT_DIR="${0:A:h}"
+
+if [[ -f "$SCRIPT_DIR/config.env" ]]; then
+  set -a
+  source "$SCRIPT_DIR/config.env"
+  set +a
+fi
+
+MODEL_ID="${MODEL_ID:-majentik/Qwen3.6-35B-A3B-TurboQuant-MLX-4bit}"
+HOST="${HOST:-127.0.0.1}"
+API_CONNECT_HOST="${API_CONNECT_HOST:-127.0.0.1}"
+PORT="${PORT:-8080}"
+API_KEY_KEYCHAIN_SERVICE="${API_KEY_KEYCHAIN_SERVICE:-swiftlm-api-key}"
+WONDERMESH_BASE_URL="${WONDERMESH_BASE_URL:-}"
+DASHBOARD_BASE_URL="${DASHBOARD_BASE_URL:-}"
+MAX_TOKENS="${MAX_TOKENS:-512}"
+CONTEXT_SIZE="${CONTEXT_SIZE:-2048}"
+MEMORY_LIMIT_MB="${MEMORY_LIMIT_MB:-12000}"
+PREFILL_SIZE="${PREFILL_SIZE:-64}"
+PARALLEL_REQUESTS="${PARALLEL_REQUESTS:-1}"
+SWIFTLM_TOP_K="${SWIFTLM_TOP_K:-8}"
+TURBO_KV="${TURBO_KV:-0}"
+
+if [[ -z "${API_KEY:-}" ]] && command -v security >/dev/null 2>&1; then
+  API_KEY="$(security find-generic-password -w -s "$API_KEY_KEYCHAIN_SERVICE" 2>/dev/null || true)"
+fi
+
+MODEL_CACHE_KEY="models--${MODEL_ID/\//--}"
+MODEL_CACHE_DIR="$SCRIPT_DIR/.cache/huggingface/hub/$MODEL_CACHE_KEY"
+MODEL_REF_FILE="$MODEL_CACHE_DIR/refs/main"
+
+if [[ -f "$MODEL_REF_FILE" ]]; then
+  MODEL_REVISION="$(<"$MODEL_REF_FILE")"
+  MODEL_PATH="$MODEL_CACHE_DIR/snapshots/$MODEL_REVISION"
+else
+  MODEL_REVISION=""
+  MODEL_PATH=""
+fi
+
+export MODEL_ID HOST API_CONNECT_HOST PORT API_KEY API_KEY_KEYCHAIN_SERVICE
+export WONDERMESH_BASE_URL DASHBOARD_BASE_URL
+export MAX_TOKENS CONTEXT_SIZE MEMORY_LIMIT_MB
+export PREFILL_SIZE PARALLEL_REQUESTS SWIFTLM_TOP_K TURBO_KV
+export MODEL_CACHE_DIR MODEL_REVISION MODEL_PATH
+
+model_is_ready() {
+  [[ -n "$MODEL_PATH" ]] || return 1
+  [[ -f "$MODEL_PATH/config.json" ]] || return 1
+  [[ -f "$MODEL_PATH/model.safetensors.index.json" ]] || return 1
+  [[ -n "$(find -L "$MODEL_PATH" -name '*.safetensors' -print -quit 2>/dev/null)" ]] || return 1
+  local item
+  for item in "$MODEL_PATH"/*; do
+    [[ -e "$item" ]] || return 1
+  done
+}

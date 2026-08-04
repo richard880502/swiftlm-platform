@@ -1,0 +1,217 @@
+#!/bin/zsh
+set -euo pipefail
+
+ROOT_DIR="${0:A:h}"
+STATE_DIR="$ROOT_DIR/.state"
+PID_FILE="$STATE_DIR/server.pid"
+LOG_FILE="$STATE_DIR/server.log"
+RUNTIME_DIR="$ROOT_DIR/swiftlm-runtime"
+
+mkdir -p "$STATE_DIR"
+source "$ROOT_DIR/common.sh"
+
+usage() {
+  cat <<'EOF'
+SwiftLM / MLX 管理指令
+
+  ./mlx start          背景啟動模型 API
+  ./mlx stop           停止模型 API
+  ./mlx restart        重新啟動
+  ./mlx status         查看模型、Port 與 API 狀態
+  ./mlx test           測試本機實際生成
+  ./mlx test origin    測試 Wonder Mesh origin 實際生成
+  ./mlx logs           持續查看後台日誌
+  ./mlx download       下載 config.env 指定的模型
+  ./mlx setup          建立 Python 3.12 工具環境
+EOF
+}
+
+require_runtime() {
+  if [[ ! -x "$RUNTIME_DIR/SwiftLM" ]]; then
+    print -u2 "找不到 SwiftLM runtime：$RUNTIME_DIR/SwiftLM"
+    exit 1
+  fi
+  if ! model_is_ready; then
+    print -u2 "模型尚未完整下載：$MODEL_ID"
+    exit 1
+  fi
+  if [[ "$HOST" != "127.0.0.1" && "$HOST" != "localhost" && -z "$API_KEY" ]]; then
+    print -u2 "非本機監聽必須先在 Keychain 設定 API key：$API_KEY_KEYCHAIN_SERVICE"
+    exit 1
+  fi
+}
+
+listener_pid() {
+  lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -n 1 || true
+}
+
+api_status() {
+  local api_base="$1"
+  local http_code
+  if [[ -n "$API_KEY" ]]; then
+    http_code="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+      -H "Authorization: Bearer $API_KEY" "$api_base/models" 2>/dev/null || true)"
+  else
+    http_code="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+      "$api_base/models" 2>/dev/null || true)"
+  fi
+  print -r -- "${http_code:-000}"
+}
+
+start_server() {
+  require_runtime
+
+  if [[ -f "$PID_FILE" ]]; then
+    local recorded_pid="$(<"$PID_FILE")"
+    if kill -0 "$recorded_pid" 2>/dev/null; then
+      print "SwiftLM 已在執行（PID $recorded_pid）"
+      return 0
+    fi
+    unlink "$PID_FILE"
+  fi
+
+  local occupied_pid="$(listener_pid)"
+  if [[ -n "$occupied_pid" ]]; then
+    print -u2 "Port $PORT 已被 PID $occupied_pid 使用；未啟動第二個服務。"
+    exit 1
+  fi
+
+  local -a swiftlm_args
+  swiftlm_args=(
+    --model "$MODEL_PATH"
+    --host "$HOST"
+    --port "$PORT"
+    --max-tokens "$MAX_TOKENS"
+    --ctx-size "$CONTEXT_SIZE"
+    --temp 0
+    --parallel "$PARALLEL_REQUESTS"
+    --mem-limit "$MEMORY_LIMIT_MB"
+    --prefill-size "$PREFILL_SIZE"
+    --stream-experts
+  )
+  [[ "$TURBO_KV" == "1" ]] && swiftlm_args+=(--turbo-kv)
+  [[ -n "$API_KEY" ]] && swiftlm_args+=(--api-key "$API_KEY")
+
+  export SWIFTLM_TOP_K
+  cd "$RUNTIME_DIR"
+  nohup "$RUNTIME_DIR/SwiftLM" "${swiftlm_args[@]}" >"$LOG_FILE" 2>&1 &
+  local new_pid=$!
+  print "$new_pid" > "$PID_FILE"
+  print "SwiftLM 已在背景啟動（PID $new_pid）"
+  print "API：http://${API_CONNECT_HOST}:${PORT}/v1"
+  print "日誌：$LOG_FILE"
+}
+
+stop_server() {
+  if [[ ! -f "$PID_FILE" ]]; then
+    local occupied_pid="$(listener_pid)"
+    if [[ -n "$occupied_pid" ]]; then
+      print -u2 "Port $PORT 由 PID $occupied_pid 使用，但沒有受管理的 PID 檔；為安全起見未停止。"
+      exit 1
+    fi
+    print "SwiftLM 沒有執行。"
+    return 0
+  fi
+
+  local recorded_pid="$(<"$PID_FILE")"
+  if kill -0 "$recorded_pid" 2>/dev/null; then
+    kill "$recorded_pid"
+    local wait_round
+    for wait_round in {1..20}; do
+      kill -0 "$recorded_pid" 2>/dev/null || break
+      sleep 0.25
+    done
+    if kill -0 "$recorded_pid" 2>/dev/null; then
+      print -u2 "PID $recorded_pid 未在 5 秒內停止，未強制終止。"
+      exit 1
+    fi
+    print "SwiftLM 已停止（PID $recorded_pid）"
+  else
+    print "PID $recorded_pid 已不存在。"
+  fi
+  unlink "$PID_FILE"
+}
+
+show_status() {
+  local current_pid="$(listener_pid)"
+  print "模型：$MODEL_ID"
+  print "模型檔：$(model_is_ready && print '完整' || print '不完整')"
+  print "本機 API：http://${API_CONNECT_HOST}:${PORT}/v1"
+  print "Client API：${DASHBOARD_BASE_URL:-未設定}"
+  print "SwiftLM origin：${WONDERMESH_BASE_URL:-未設定}"
+  if [[ -n "$current_pid" ]]; then
+    print "服務：執行中（PID $current_pid）"
+    print "本機 HTTP：$(api_status "http://${API_CONNECT_HOST}:${PORT}/v1")"
+  else
+    print "服務：未執行"
+  fi
+}
+
+run_test() {
+  local target="${1:-local}"
+  local api_base
+  case "$target" in
+    local) api_base="http://${API_CONNECT_HOST}:${PORT}/v1" ;;
+    origin)
+      if [[ -z "$WONDERMESH_BASE_URL" ]]; then
+        print -u2 "WONDERMESH_BASE_URL 尚未設定。"
+        exit 1
+      fi
+      api_base="$WONDERMESH_BASE_URL"
+      ;;
+    *) print -u2 "未知測試目標：$target（可用 local 或 origin）"; exit 2 ;;
+  esac
+
+  local -a curl_args
+  curl_args=(
+    --fail-with-body --silent --show-error --max-time 300
+    "$api_base/chat/completions"
+    -H "Content-Type: application/json"
+  )
+  [[ -n "$API_KEY" ]] && curl_args+=(-H "Authorization: Bearer $API_KEY")
+
+  curl "${curl_args[@]}" --data-binary @- <<JSON
+{"model":"$MODEL_ID","messages":[{"role":"user","content":"請只回答：MLX API 正常"}],"max_tokens":16,"temperature":0}
+JSON
+  print
+}
+
+download_model() {
+  local hf_bin="$ROOT_DIR/.venv/bin/hf"
+  if [[ ! -x "$hf_bin" ]]; then
+    print -u2 "找不到 $hf_bin；請先執行 ./mlx setup"
+    exit 1
+  fi
+  export HF_HOME="$ROOT_DIR/.cache/huggingface"
+  export HF_XET_HIGH_PERFORMANCE="1"
+  print "下載：$MODEL_ID"
+  print "快取：$HF_HOME"
+  "$hf_bin" download "$MODEL_ID" --cache-dir "$HF_HOME/hub"
+}
+
+setup_tools() {
+  local uv_bin="${UV_BIN:-/Users/richard/.local/bin/uv}"
+  if [[ ! -x "$uv_bin" ]]; then
+    print -u2 "找不到 uv：$uv_bin"
+    exit 1
+  fi
+  export UV_CACHE_DIR="$ROOT_DIR/.uv-cache"
+  "$uv_bin" venv "$ROOT_DIR/.venv" --python 3.12
+  "$uv_bin" pip install --python "$ROOT_DIR/.venv/bin/python" --upgrade mlx-lm huggingface-hub
+  print "工具環境已完成。"
+}
+
+command_name="${1:-help}"
+shift || true
+case "$command_name" in
+  start) start_server ;;
+  stop) stop_server ;;
+  restart) stop_server; start_server ;;
+  status) show_status ;;
+  test) run_test "${1:-local}" ;;
+  logs) touch "$LOG_FILE"; tail -n 100 -f "$LOG_FILE" ;;
+  download) download_model ;;
+  setup) setup_tools ;;
+  help|-h|--help) usage ;;
+  *) print -u2 "未知指令：$command_name"; usage; exit 2 ;;
+esac

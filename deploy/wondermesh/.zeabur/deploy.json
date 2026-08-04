@@ -1,0 +1,15 @@
+{
+  "method": "template",
+  "workspace": null,
+  "projectId": "6a7153b3fefeb46a8835090d",
+  "serviceId": "6a7156475102c1b1f62cda80",
+  "environmentId": "6a7153b35f062718bc7b2ad2",
+  "environment": null,
+  "git": {
+    "connected": false,
+    "remote": null,
+    "branch": null
+  },
+  "dockerImage": "alpine/socat:1.8.0.3",
+  "templateFile": "zeabur-template.yaml"
+}

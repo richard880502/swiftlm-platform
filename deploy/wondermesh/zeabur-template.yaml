@@ -1,0 +1,25 @@
+# yaml-language-server: $schema=https://schema.zeabur.app/template.json
+apiVersion: zeabur.com/v1
+kind: Template
+metadata:
+  name: SwiftLM Wonder Mesh Relay
+spec:
+  description: Multi-architecture TCP relay from Wonder Mesh to SwiftLM on the macOS host.
+  services:
+    - name: swiftlm-relay
+      template: PREBUILT_V2
+      spec:
+        source:
+          image: alpine/socat:1.8.0.3
+          command:
+            - socat
+            - -d
+            - -d
+            - TCP-LISTEN:8080,fork,reuseaddr
+            - TCP:192.168.5.2:18123
+        ports:
+          - id: web
+            port: 8080
+            type: HTTP
+        portForwarding:
+          enabled: true

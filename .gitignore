@@ -1,0 +1,10 @@
+.DS_Store
+.cache/
+.uv-cache/
+.venv/
+*.log
+server.pid
+.state/
+swiftlm-runtime/SwiftLM
+swiftlm-runtime/*.tar.gz
+swiftlm-runtime/*.metallib

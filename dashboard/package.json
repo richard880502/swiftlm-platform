@@ -1,0 +1,18 @@
+{
+  "name": "swiftlm-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Secure dashboard and OpenAI-compatible API gateway for a local SwiftLM service",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "5.1.0"
+  }
+}

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>SwiftLM Console</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <main id="loginView" class="login-shell hidden">
+      <section class="login-card glass">
+        <div class="brand-mark" aria-hidden="true">S</div>
+        <p class="eyebrow">LOCAL INTELLIGENCE</p>
+        <h1>SwiftLM Console</h1>
+        <p class="muted">管理本機模型、API 金鑰與完整對話紀錄。</p>
+        <form id="loginForm">
+          <label for="password">管理員密碼</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+          <button type="submit" class="primary wide">登入控制台</button>
+          <p id="loginError" class="error" role="alert"></p>
+        </form>
+      </section>
+    </main>
+
+    <main id="appView" class="app-shell hidden">
+      <aside class="sidebar glass">
+        <div class="brand-row">
+          <div class="brand-mark small">S</div>
+          <div>
+            <strong>SwiftLM</strong>
+            <span>Console</span>
+          </div>
+        </div>
+
+        <button id="newChatButton" class="primary new-chat">＋ 新對話</button>
+        <nav id="conversationList" class="conversation-list" aria-label="對話清單"></nav>
+
+        <div class="sidebar-footer">
+          <button class="nav-button" data-panel="keys">API Keys</button>
+          <button class="nav-button" data-panel="activity">使用紀錄</button>
+          <button id="logoutButton" class="nav-button subtle">登出</button>
+        </div>
+      </aside>
+
+      <section class="workspace glass">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">QWEN · MLX · WONDER MESH</p>
+            <h2 id="conversationTitle">選擇或建立一個對話</h2>
+          </div>
+          <div id="statusPill" class="status-pill checking">
+            <span class="status-dot"></span>
+            <span id="statusText">檢查模型</span>
+          </div>
+        </header>
+
+        <section id="emptyState" class="empty-state">
+          <div class="orb">Q</div>
+          <h3>你的本機模型，現在有了控制台。</h3>
+          <p>建立新對話，內容會保存在 Dashboard 的持久化資料庫。</p>
+          <button id="emptyNewChat" class="primary">開始第一個對話</button>
+        </section>
+
+        <section id="chatView" class="chat-view hidden">
+          <div id="messageList" class="message-list"></div>
+          <form id="composer" class="composer">
+            <textarea id="messageInput" rows="1" placeholder="傳送訊息給本機 Qwen…" required></textarea>
+            <div class="composer-footer">
+              <div class="settings-row">
+                <label class="toggle">
+                  <input id="thinkingToggle" type="checkbox" />
+                  <span></span>
+                  顯示推理
+                </label>
+                <label>
+                  輸出
+                  <select id="maxTokens">
+                    <option value="1024">1K</option>
+                    <option value="2048" selected>2K</option>
+                    <option value="4096">4K</option>
+                    <option value="8192">8K</option>
+                  </select>
+                </label>
+              </div>
+              <button id="sendButton" class="send-button" type="submit" aria-label="傳送">↑</button>
+            </div>
+          </form>
+        </section>
+      </section>
+
+      <section id="panel" class="panel glass hidden" aria-live="polite">
+        <header class="panel-header">
+          <div>
+            <p class="eyebrow" id="panelEyebrow">MANAGEMENT</p>
+            <h2 id="panelTitle">API Keys</h2>
+          </div>
+          <button id="closePanel" class="icon-button" aria-label="關閉">×</button>
+        </header>
+        <div id="panelContent" class="panel-content"></div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden" role="status"></div>
+    <script type="module" src="/app.js?v=2"></script>
+  </body>
+</html>
