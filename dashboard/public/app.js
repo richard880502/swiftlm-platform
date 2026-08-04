@@ -1,7 +1,9 @@
 const state = {
   conversations: [],
   current: null,
+  currentView: "chat",
   sending: false,
+  query: "",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -14,8 +16,16 @@ const elements = {
   logoutButton: $("#logoutButton"),
   newChatButton: $("#newChatButton"),
   emptyNewChat: $("#emptyNewChat"),
+  conversationSearch: $("#conversationSearch"),
+  conversationSection: $("#conversationSection"),
   conversationList: $("#conversationList"),
-  conversationTitle: $("#conversationTitle"),
+  chatWorkspace: $("#chatWorkspace"),
+  activityWorkspace: $("#activityWorkspace"),
+  keysWorkspace: $("#keysWorkspace"),
+  viewEyebrow: $("#viewEyebrow"),
+  viewTitle: $("#viewTitle"),
+  viewDescription: $("#viewDescription"),
+  deleteConversationButton: $("#deleteConversationButton"),
   emptyState: $("#emptyState"),
   chatView: $("#chatView"),
   messageList: $("#messageList"),
@@ -26,12 +36,35 @@ const elements = {
   maxTokens: $("#maxTokens"),
   statusPill: $("#statusPill"),
   statusText: $("#statusText"),
-  panel: $("#panel"),
-  panelTitle: $("#panelTitle"),
-  panelEyebrow: $("#panelEyebrow"),
-  panelContent: $("#panelContent"),
-  closePanel: $("#closePanel"),
+  sidebarStatusText: $("#sidebarStatusText"),
+  requestCount: $("#requestCount"),
+  successRate: $("#successRate"),
+  averageLatency: $("#averageLatency"),
+  activityList: $("#activityList"),
+  refreshActivityButton: $("#refreshActivityButton"),
+  keyReveal: $("#keyReveal"),
+  createKeyForm: $("#createKeyForm"),
+  keyName: $("#keyName"),
+  keyList: $("#keyList"),
   toast: $("#toast"),
+};
+
+const viewCopy = {
+  chat: {
+    eyebrow: "CONVERSATIONS",
+    title: "對話",
+    description: "在你的 Mac 上與本機模型安全對談。",
+  },
+  activity: {
+    eyebrow: "REQUEST HISTORY",
+    title: "使用紀錄",
+    description: "檢視每一筆模型請求、延遲與 Token 使用量。",
+  },
+  keys: {
+    eyebrow: "ACCESS MANAGEMENT",
+    title: "API Keys",
+    description: "建立與管理可呼叫 OpenAI 相容端點的存取金鑰。",
+  },
 };
 
 async function request(url, options = {}) {
@@ -62,7 +95,7 @@ function showToast(message) {
 }
 
 function escapeHtml(value = "") {
-  return value.replace(/[&<>'"]/g, (character) => ({
+  return String(value).replace(/[&<>'"]/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
   })[character]);
 }
@@ -74,10 +107,14 @@ function formatDate(value) {
   }).format(new Date(value));
 }
 
+function formatNumber(value) {
+  return new Intl.NumberFormat("zh-TW").format(Number(value) || 0);
+}
+
 async function bootstrap() {
   try {
     await request("/api/auth/me");
-    showApp();
+    await showApp();
   } catch {
     showLogin();
   }
@@ -93,18 +130,22 @@ async function showApp() {
   elements.loginView.classList.add("hidden");
   elements.appView.classList.remove("hidden");
   await Promise.all([loadConversations(), refreshStatus()]);
+  switchView("chat");
 }
 
 async function refreshStatus() {
   elements.statusPill.className = "status-pill checking";
   elements.statusText.textContent = "檢查模型";
+  elements.sidebarStatusText.textContent = "正在檢查…";
   try {
     const result = await request("/api/status");
     elements.statusPill.className = "status-pill online";
     elements.statusText.textContent = `模型在線 · ${result.latency_ms}ms`;
+    elements.sidebarStatusText.textContent = "已連線";
   } catch {
     elements.statusPill.className = "status-pill offline";
     elements.statusText.textContent = "模型離線";
+    elements.sidebarStatusText.textContent = "無法連線";
   }
 }
 
@@ -116,13 +157,24 @@ async function loadConversations(selectId) {
 }
 
 function renderConversationList() {
-  elements.conversationList.innerHTML = state.conversations.map((conversation) => `
+  const normalized = state.query.trim().toLocaleLowerCase("zh-Hant");
+  const visible = state.conversations.filter((conversation) => (
+    !normalized
+      || conversation.title.toLocaleLowerCase("zh-Hant").includes(normalized)
+      || conversation.last_message?.toLocaleLowerCase("zh-Hant").includes(normalized)
+  ));
+
+  elements.conversationList.innerHTML = visible.length ? visible.map((conversation) => `
     <button class="conversation-item ${state.current?.id === conversation.id ? "active" : ""}"
       data-conversation-id="${conversation.id}">
-      <strong>${escapeHtml(conversation.title)}</strong>
-      <span>${conversation.message_count} 則訊息 · ${formatDate(conversation.updated_at)}</span>
+      <span class="conversation-symbol" aria-hidden="true"></span>
+      <span class="conversation-copy">
+        <strong>${escapeHtml(conversation.title)}</strong>
+        <small>${conversation.message_count} 則訊息 · ${formatDate(conversation.updated_at)}</small>
+      </span>
     </button>
-  `).join("");
+  `).join("") : `<p class="conversation-empty">${normalized ? "找不到符合的對話" : "還沒有對話"}</p>`;
+
   elements.conversationList.querySelectorAll("[data-conversation-id]").forEach((button) => {
     button.addEventListener("click", () => selectConversation(button.dataset.conversationId));
   });
@@ -133,17 +185,35 @@ async function createConversation() {
     method: "POST",
     body: JSON.stringify({}),
   });
+  switchView("chat");
   await loadConversations(conversation.id);
   elements.messageInput.focus();
 }
 
 async function selectConversation(id) {
   state.current = await request(`/api/conversations/${id}`);
+  switchView("chat", { preserveTitle: true });
   elements.emptyState.classList.add("hidden");
   elements.chatView.classList.remove("hidden");
-  elements.conversationTitle.textContent = state.current.title;
+  elements.viewTitle.textContent = state.current.title;
+  elements.viewDescription.textContent = `${state.current.messages.length} 則訊息 · 更新於 ${formatDate(state.current.updated_at)}`;
+  elements.deleteConversationButton.classList.remove("hidden");
   renderConversationList();
   renderMessages();
+}
+
+async function deleteCurrentConversation() {
+  if (!state.current || state.sending) return;
+  const title = state.current.title;
+  if (!confirm(`確定刪除「${title}」？\n\n這個對話與其中的訊息將永久刪除。`)) return;
+  await request(`/api/conversations/${state.current.id}`, { method: "DELETE" });
+  state.current = null;
+  elements.chatView.classList.add("hidden");
+  elements.emptyState.classList.remove("hidden");
+  elements.deleteConversationButton.classList.add("hidden");
+  applyViewCopy("chat");
+  await loadConversations();
+  showToast("對話已刪除");
 }
 
 function renderMessages() {
@@ -154,11 +224,14 @@ function renderMessages() {
 }
 
 function messageHtml(message, pending = false) {
-  const label = message.role === "user" ? "YOU" : "SWIFTLM";
+  const isUser = message.role === "user";
   return `
     <article class="message ${message.role} ${pending ? "pending" : ""}" ${pending ? 'id="pendingAssistant"' : ""}>
-      <div class="message-role">${label}</div>
-      <div class="message-content">${escapeHtml(message.content)}</div>
+      <div class="message-avatar" aria-hidden="true">${isUser ? "你" : "S"}</div>
+      <div class="message-body">
+        <div class="message-meta"><strong>${isUser ? "你" : "SwiftLM"}</strong><span>${isUser ? "剛剛" : "本機模型"}</span></div>
+        <div class="message-content">${escapeHtml(message.content)}</div>
+      </div>
     </article>
   `;
 }
@@ -179,6 +252,7 @@ async function sendMessage(event) {
 
   state.sending = true;
   elements.sendButton.disabled = true;
+  elements.deleteConversationButton.disabled = true;
   elements.messageInput.value = "";
   resizeComposer();
   state.current.messages.push({ role: "user", content, created_at: new Date().toISOString() });
@@ -216,9 +290,7 @@ async function sendMessage(event) {
         .filter((line) => line.startsWith("data:"))
         .map((line) => line.slice(5).trimStart()).join("\n");
       if (!data || data === "[DONE]" || eventName === "dashboard") return;
-      if (eventName === "error") {
-        throw new Error(JSON.parse(data).message || "串流失敗");
-      }
+      if (eventName === "error") throw new Error(JSON.parse(data).message || "串流失敗");
       try {
         assistant += JSON.parse(data).choices?.[0]?.delta?.content || "";
       } catch {
@@ -248,83 +320,110 @@ async function sendMessage(event) {
   } finally {
     state.sending = false;
     elements.sendButton.disabled = false;
+    elements.deleteConversationButton.disabled = false;
     elements.messageInput.focus();
   }
 }
 
-async function openPanel(type) {
-  elements.panel.classList.remove("hidden");
-  if (type === "keys") await renderKeysPanel();
-  if (type === "activity") await renderActivityPanel();
+function applyViewCopy(type) {
+  const copy = viewCopy[type];
+  elements.viewEyebrow.textContent = copy.eyebrow;
+  elements.viewTitle.textContent = copy.title;
+  elements.viewDescription.textContent = copy.description;
 }
 
-async function renderKeysPanel(revealedKey) {
-  elements.panelTitle.textContent = "API Keys";
-  elements.panelEyebrow.textContent = "ACCESS MANAGEMENT";
-  const result = await request("/api/keys");
-  elements.panelContent.innerHTML = `
-    ${revealedKey ? `
-      <div class="key-reveal">
-        <strong>只會顯示這一次</strong>
-        <code>${escapeHtml(revealedKey)}</code>
-        <button class="primary" id="copyRevealedKey">複製 Key</button>
-      </div>
-    ` : ""}
-    <form id="createKeyForm" class="panel-toolbar">
-      <input id="keyName" placeholder="例如：MacBook、測試服務" maxlength="80" required />
-      <button class="primary" type="submit">建立</button>
-    </form>
-    <div>
-      ${result.data.length ? result.data.map((key) => `
-        <div class="card-row">
-          <div class="card-row-head">
-            <div><strong>${escapeHtml(key.name)}</strong><br /><code>${escapeHtml(key.prefix)}</code></div>
-            ${key.revoked_at
-              ? '<span class="muted">已撤銷</span>'
-              : `<button class="danger-button" data-revoke-key="${key.id}">撤銷</button>`}
+function switchView(type, options = {}) {
+  state.currentView = type;
+  elements.chatWorkspace.classList.toggle("hidden", type !== "chat");
+  elements.activityWorkspace.classList.toggle("hidden", type !== "activity");
+  elements.keysWorkspace.classList.toggle("hidden", type !== "keys");
+  elements.conversationSection.classList.toggle("view-muted", type !== "chat");
+  elements.deleteConversationButton.classList.toggle("hidden", type !== "chat" || !state.current);
+  document.querySelectorAll("[data-view]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.view === type);
+  });
+  if (!options.preserveTitle) applyViewCopy(type);
+  if (type === "activity") renderActivity();
+  if (type === "keys") renderKeys();
+}
+
+async function renderActivity() {
+  elements.activityList.innerHTML = '<div class="loading-row">正在載入使用紀錄…</div>';
+  try {
+    const result = await request("/api/activity?limit=100");
+    const entries = result.data || [];
+    const successful = entries.filter((entry) => entry.status >= 200 && entry.status < 300).length;
+    const average = entries.length
+      ? Math.round(entries.reduce((sum, entry) => sum + (entry.latency_ms || 0), 0) / entries.length)
+      : 0;
+    elements.requestCount.textContent = formatNumber(entries.length);
+    elements.successRate.textContent = entries.length ? `${Math.round((successful / entries.length) * 100)}%` : "—";
+    elements.averageLatency.textContent = entries.length ? `${formatNumber(average)} ms` : "—";
+    elements.activityList.innerHTML = entries.length ? entries.map((entry) => {
+      const tokens = entry.prompt_tokens == null
+        ? "未回報 Token"
+        : `${formatNumber(entry.prompt_tokens)} + ${formatNumber(entry.completion_tokens)} tokens`;
+      const success = entry.status >= 200 && entry.status < 300;
+      return `
+        <article class="activity-row">
+          <span class="request-indicator ${success ? "success" : "failed"}" aria-hidden="true"></span>
+          <div class="activity-main">
+            <div class="activity-title"><strong>${escapeHtml(entry.route)}</strong><span>${formatDate(entry.created_at)}</span></div>
+            <p>${escapeHtml(entry.api_key_name || "Dashboard")} · ${tokens}</p>
+            ${entry.response_preview ? `<p class="response-preview">${escapeHtml(entry.response_preview.slice(0, 180))}</p>` : ""}
           </div>
-          <p>建立：${formatDate(key.created_at)} · 最近使用：${formatDate(key.last_used_at)}</p>
-        </div>
-      `).join("") : '<p class="muted">尚未建立 Dashboard API Key。</p>'}
-    </div>
-  `;
-
-  $("#createKeyForm").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const created = await request("/api/keys", {
-      method: "POST",
-      body: JSON.stringify({ name: $("#keyName").value }),
-    });
-    await renderKeysPanel(created.key);
-  });
-  $("#copyRevealedKey")?.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(revealedKey);
-    showToast("API Key 已複製");
-  });
-  elements.panelContent.querySelectorAll("[data-revoke-key]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      if (!confirm("確定撤銷這把 API Key？使用它的程式會立即失效。")) return;
-      await request(`/api/keys/${button.dataset.revokeKey}/revoke`, { method: "POST" });
-      await renderKeysPanel();
-    });
-  });
+          <div class="activity-metrics"><strong>${entry.status}</strong><span>${formatNumber(entry.latency_ms)} ms</span></div>
+        </article>
+      `;
+    }).join("") : '<div class="empty-list"><strong>尚無使用紀錄</strong><span>開始對話或使用 API 後，請求會顯示在這裡。</span></div>';
+  } catch (error) {
+    elements.activityList.innerHTML = `<div class="empty-list error"><strong>載入失敗</strong><span>${escapeHtml(error.message)}</span></div>`;
+  }
 }
 
-async function renderActivityPanel() {
-  elements.panelTitle.textContent = "使用紀錄";
-  elements.panelEyebrow.textContent = "REQUEST HISTORY";
-  const result = await request("/api/activity?limit=100");
-  elements.panelContent.innerHTML = result.data.length ? result.data.map((entry) => `
-    <div class="card-row">
-      <div class="card-row-head">
-        <strong>${escapeHtml(entry.route)}</strong>
-        <span>${entry.status} · ${entry.latency_ms}ms</span>
-      </div>
-      <p>${formatDate(entry.created_at)} · ${escapeHtml(entry.api_key_name || "Dashboard")}
-      ${entry.prompt_tokens == null ? "" : ` · ${entry.prompt_tokens}+${entry.completion_tokens || 0} tokens`}</p>
-      ${entry.response_preview ? `<p>${escapeHtml(entry.response_preview.slice(0, 180))}</p>` : ""}
-    </div>
-  `).join("") : '<p class="muted">尚無使用紀錄。</p>';
+async function renderKeys(revealedKey) {
+  if (revealedKey) {
+    elements.keyReveal.classList.remove("hidden");
+    elements.keyReveal.innerHTML = `
+      <div><strong>請立即保存這把 Key</strong><p>基於安全考量，離開後不會再次顯示完整內容。</p></div>
+      <code>${escapeHtml(revealedKey)}</code>
+      <button class="primary" id="copyRevealedKey">複製</button>
+    `;
+    $("#copyRevealedKey").addEventListener("click", async () => {
+      await navigator.clipboard.writeText(revealedKey);
+      showToast("API Key 已複製");
+    });
+  } else {
+    elements.keyReveal.classList.add("hidden");
+    elements.keyReveal.innerHTML = "";
+  }
+
+  elements.keyList.innerHTML = '<div class="loading-row">正在載入 API Keys…</div>';
+  try {
+    const result = await request("/api/keys");
+    elements.keyList.innerHTML = result.data.length ? result.data.map((key) => `
+      <article class="key-row ${key.revoked_at ? "revoked" : ""}">
+        <div class="key-badge" aria-hidden="true"></div>
+        <div class="key-main">
+          <div class="key-title"><strong>${escapeHtml(key.name)}</strong>${key.revoked_at ? '<span class="state-label">已撤銷</span>' : '<span class="state-label active">使用中</span>'}</div>
+          <code>${escapeHtml(key.prefix)}••••••••••••••••</code>
+          <p>建立於 ${formatDate(key.created_at)} · 最近使用 ${formatDate(key.last_used_at)}</p>
+        </div>
+        ${key.revoked_at ? "" : `<button class="danger-button" data-revoke-key="${key.id}">撤銷</button>`}
+      </article>
+    `).join("") : '<div class="empty-list"><strong>尚未建立 API Key</strong><span>建立一把 Key，讓其他電腦或應用程式安全呼叫模型。</span></div>';
+
+    elements.keyList.querySelectorAll("[data-revoke-key]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        if (!confirm("確定撤銷這把 API Key？使用它的程式會立即失效。")) return;
+        await request(`/api/keys/${button.dataset.revokeKey}/revoke`, { method: "POST" });
+        await renderKeys();
+        showToast("API Key 已撤銷");
+      });
+    });
+  } catch (error) {
+    elements.keyList.innerHTML = `<div class="empty-list error"><strong>載入失敗</strong><span>${escapeHtml(error.message)}</span></div>`;
+  }
 }
 
 elements.loginForm.addEventListener("submit", async (event) => {
@@ -349,6 +448,21 @@ elements.logoutButton.addEventListener("click", async () => {
 });
 elements.newChatButton.addEventListener("click", createConversation);
 elements.emptyNewChat.addEventListener("click", createConversation);
+elements.deleteConversationButton.addEventListener("click", deleteCurrentConversation);
+elements.refreshActivityButton.addEventListener("click", renderActivity);
+elements.createKeyForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const created = await request("/api/keys", {
+    method: "POST",
+    body: JSON.stringify({ name: elements.keyName.value }),
+  });
+  elements.keyName.value = "";
+  await renderKeys(created.key);
+});
+elements.conversationSearch.addEventListener("input", () => {
+  state.query = elements.conversationSearch.value;
+  renderConversationList();
+});
 elements.composer.addEventListener("submit", sendMessage);
 elements.messageInput.addEventListener("input", resizeComposer);
 elements.messageInput.addEventListener("keydown", (event) => {
@@ -357,9 +471,8 @@ elements.messageInput.addEventListener("keydown", (event) => {
     elements.composer.requestSubmit();
   }
 });
-elements.closePanel.addEventListener("click", () => elements.panel.classList.add("hidden"));
-document.querySelectorAll("[data-panel]").forEach((button) => {
-  button.addEventListener("click", () => openPanel(button.dataset.panel));
+document.querySelectorAll("[data-view]").forEach((button) => {
+  button.addEventListener("click", () => switchView(button.dataset.view));
 });
 
 bootstrap();

@@ -24,3 +24,17 @@ test("keys, conversations and history persist across reopen", () => {
   assert.equal(store.authenticateApiKey("digest-1"), null);
   store.close();
 });
+
+test("deleting a conversation also removes its messages", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "swiftlm-dashboard-delete-test-"));
+  const database = path.join(directory, "test.sqlite");
+  const store = createStore(database);
+  const conversation = store.createConversation({ title: "待刪除" });
+
+  store.addMessage(conversation.id, "user", "這是一則測試訊息");
+  assert.equal(store.getConversation(conversation.id).messages.length, 1);
+  assert.equal(store.deleteConversation(conversation.id), true);
+  assert.equal(store.getConversation(conversation.id), null);
+  assert.equal(store.deleteConversation(conversation.id), false);
+  store.close();
+});
