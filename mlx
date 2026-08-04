@@ -5,7 +5,11 @@ ROOT_DIR="${0:A:h}"
 STATE_DIR="$ROOT_DIR/.state"
 PID_FILE="$STATE_DIR/server.pid"
 LOG_FILE="$STATE_DIR/server.log"
+GATEWAY_PID_FILE="$STATE_DIR/gateway.pid"
+GATEWAY_LOG_FILE="$STATE_DIR/gateway.log"
+REQUEST_LOG_FILE="$STATE_DIR/requests.jsonl"
 RUNTIME_DIR="$ROOT_DIR/swiftlm-runtime"
+GATEWAY_SCRIPT="$ROOT_DIR/mlx-gateway/server.mjs"
 
 mkdir -p "$STATE_DIR"
 source "$ROOT_DIR/common.sh"
@@ -15,12 +19,17 @@ usage() {
 SwiftLM / MLX 管理指令
 
   ./mlx start          背景啟動模型 API
+  ./mlx start gateway  只啟動 MLX gateway
   ./mlx stop           停止模型 API
+  ./mlx stop gateway   只停止 MLX gateway
   ./mlx restart        重新啟動
+  ./mlx restart gateway 只重新啟動 MLX gateway
   ./mlx status         查看模型、Port 與 API 狀態
   ./mlx test           測試本機實際生成
   ./mlx test origin    測試 Wonder Mesh origin 實際生成
-  ./mlx logs           持續查看後台日誌
+  ./mlx logs           持續查看 SwiftLM 原始日誌
+  ./mlx logs engine    持續查看 SwiftLM 原始日誌
+  ./mlx logs requests  查看乾淨的 API 請求、佇列與 throughput
   ./mlx download       下載 config.env 指定的模型
   ./mlx setup          建立 Python 3.12 工具環境
 EOF
@@ -45,6 +54,10 @@ listener_pid() {
   lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -n 1 || true
 }
 
+gateway_listener_pid() {
+  lsof -tiTCP:"$GATEWAY_PORT" -sTCP:LISTEN 2>/dev/null | head -n 1 || true
+}
+
 api_status() {
   local api_base="$1"
   local http_code
@@ -61,48 +74,90 @@ api_status() {
 start_server() {
   require_runtime
 
+  local runtime_running=0
   if [[ -f "$PID_FILE" ]]; then
     local recorded_pid="$(<"$PID_FILE")"
     if kill -0 "$recorded_pid" 2>/dev/null; then
       print "SwiftLM 已在執行（PID $recorded_pid）"
-      return 0
+      runtime_running=1
+    else
+      unlink "$PID_FILE"
     fi
-    unlink "$PID_FILE"
   fi
 
-  local occupied_pid="$(listener_pid)"
-  if [[ -n "$occupied_pid" ]]; then
-    print -u2 "Port $PORT 已被 PID $occupied_pid 使用；未啟動第二個服務。"
+  if (( ! runtime_running )); then
+    local occupied_pid="$(listener_pid)"
+    if [[ -n "$occupied_pid" ]]; then
+      print -u2 "Port $PORT 已被 PID $occupied_pid 使用；未啟動第二個服務。"
+      exit 1
+    fi
+
+    local -a swiftlm_args
+    swiftlm_args=(
+      --model "$MODEL_PATH"
+      --host "$HOST"
+      --port "$PORT"
+      --max-tokens "$MAX_TOKENS"
+      --ctx-size "$CONTEXT_SIZE"
+      --temp 0
+      --parallel "$PARALLEL_REQUESTS"
+      --mem-limit "$MEMORY_LIMIT_MB"
+      --prefill-size "$PREFILL_SIZE"
+      --stream-experts
+    )
+    [[ "$TURBO_KV" == "1" ]] && swiftlm_args+=(--turbo-kv)
+    [[ -n "$API_KEY" ]] && swiftlm_args+=(--api-key "$API_KEY")
+
+    export SWIFTLM_TOP_K
+    cd "$RUNTIME_DIR"
+    nohup "$RUNTIME_DIR/SwiftLM" "${swiftlm_args[@]}" >"$LOG_FILE" 2>&1 &
+    local new_pid=$!
+    print "$new_pid" > "$PID_FILE"
+    print "SwiftLM 已在背景啟動（PID $new_pid）"
+    print "Direct API：http://${API_CONNECT_HOST}:${PORT}/v1"
+    print "引擎日誌：$LOG_FILE"
+  fi
+
+  start_gateway
+}
+
+start_gateway() {
+  if [[ ! -f "$GATEWAY_SCRIPT" ]]; then
+    print -u2 "找不到 MLX gateway：$GATEWAY_SCRIPT"
     exit 1
   fi
-
-  local -a swiftlm_args
-  swiftlm_args=(
-    --model "$MODEL_PATH"
-    --host "$HOST"
-    --port "$PORT"
-    --max-tokens "$MAX_TOKENS"
-    --ctx-size "$CONTEXT_SIZE"
-    --temp 0
-    --parallel "$PARALLEL_REQUESTS"
-    --mem-limit "$MEMORY_LIMIT_MB"
-    --prefill-size "$PREFILL_SIZE"
-    --stream-experts
+  if ! command -v node >/dev/null 2>&1; then
+    print -u2 "找不到 Node.js，無法啟動 MLX gateway。"
+    exit 1
+  fi
+  if [[ -f "$GATEWAY_PID_FILE" ]]; then
+    local recorded_pid="$(<"$GATEWAY_PID_FILE")"
+    if kill -0 "$recorded_pid" 2>/dev/null; then
+      print "MLX gateway 已在執行（PID $recorded_pid）"
+      return 0
+    fi
+    unlink "$GATEWAY_PID_FILE"
+  fi
+  local occupied_pid="$(gateway_listener_pid)"
+  if [[ -n "$occupied_pid" ]]; then
+    print -u2 "Gateway port $GATEWAY_PORT 已被 PID $occupied_pid 使用；未啟動第二個服務。"
+    exit 1
+  fi
+  (
+    unset API_KEY
+    cd "$ROOT_DIR"
+    GATEWAY_REQUEST_LOG="$REQUEST_LOG_FILE" \
+      nohup node "$GATEWAY_SCRIPT" >"$GATEWAY_LOG_FILE" 2>&1 &
+    print "$!" > "$GATEWAY_PID_FILE"
   )
-  [[ "$TURBO_KV" == "1" ]] && swiftlm_args+=(--turbo-kv)
-  [[ -n "$API_KEY" ]] && swiftlm_args+=(--api-key "$API_KEY")
-
-  export SWIFTLM_TOP_K
-  cd "$RUNTIME_DIR"
-  nohup "$RUNTIME_DIR/SwiftLM" "${swiftlm_args[@]}" >"$LOG_FILE" 2>&1 &
-  local new_pid=$!
-  print "$new_pid" > "$PID_FILE"
-  print "SwiftLM 已在背景啟動（PID $new_pid）"
-  print "API：http://${API_CONNECT_HOST}:${PORT}/v1"
-  print "日誌：$LOG_FILE"
+  local new_pid="$(<"$GATEWAY_PID_FILE")"
+  print "MLX gateway 已啟動（PID $new_pid）"
+  print "Gateway API：http://${GATEWAY_CONNECT_HOST}:${GATEWAY_PORT}/v1"
+  print "請求日誌：$REQUEST_LOG_FILE"
 }
 
 stop_server() {
+  stop_gateway
   if [[ ! -f "$PID_FILE" ]]; then
     local occupied_pid="$(listener_pid)"
     if [[ -n "$occupied_pid" ]]; then
@@ -132,11 +187,31 @@ stop_server() {
   unlink "$PID_FILE"
 }
 
+stop_gateway() {
+  if [[ ! -f "$GATEWAY_PID_FILE" ]]; then return 0; fi
+  local recorded_pid="$(<"$GATEWAY_PID_FILE")"
+  if kill -0 "$recorded_pid" 2>/dev/null; then
+    kill "$recorded_pid"
+    local wait_round
+    for wait_round in {1..20}; do
+      kill -0 "$recorded_pid" 2>/dev/null || break
+      sleep 0.25
+    done
+    if kill -0 "$recorded_pid" 2>/dev/null; then
+      print -u2 "MLX gateway PID $recorded_pid 未在 5 秒內停止，未強制終止。"
+      exit 1
+    fi
+    print "MLX gateway 已停止（PID $recorded_pid）"
+  fi
+  unlink "$GATEWAY_PID_FILE"
+}
+
 show_status() {
   local current_pid="$(listener_pid)"
   print "模型：$MODEL_ID"
   print "模型檔：$(model_is_ready && print '完整' || print '不完整')"
-  print "本機 API：http://${API_CONNECT_HOST}:${PORT}/v1"
+  print "SwiftLM Direct：http://${API_CONNECT_HOST}:${PORT}/v1"
+  print "MLX Gateway：http://${GATEWAY_CONNECT_HOST}:${GATEWAY_PORT}/v1"
   print "Client API：${DASHBOARD_BASE_URL:-未設定}"
   print "SwiftLM origin：${WONDERMESH_BASE_URL:-未設定}"
   if [[ -n "$current_pid" ]]; then
@@ -145,13 +220,25 @@ show_status() {
   else
     print "服務：未執行"
   fi
+  local current_gateway_pid="$(gateway_listener_pid)"
+  if [[ -n "$current_gateway_pid" ]]; then
+    local gateway_health
+    gateway_health="$(curl -sS --max-time 3 "http://${GATEWAY_CONNECT_HOST}:${GATEWAY_PORT}/__mlx/health" 2>/dev/null || true)"
+    print "Gateway：執行中（PID $current_gateway_pid）"
+    if [[ -n "$gateway_health" ]] && command -v jq >/dev/null 2>&1; then
+      print -r -- "$gateway_health" | jq -r '"請求：running=\(.running) waiting=\(.waiting) parallel=\(.parallel_limit)"'
+    fi
+  else
+    print "Gateway：未執行"
+  fi
 }
 
 run_test() {
   local target="${1:-local}"
   local api_base
   case "$target" in
-    local) api_base="http://${API_CONNECT_HOST}:${PORT}/v1" ;;
+    local) api_base="http://${GATEWAY_CONNECT_HOST}:${GATEWAY_PORT}/v1" ;;
+    direct) api_base="http://${API_CONNECT_HOST}:${PORT}/v1" ;;
     origin)
       if [[ -z "$WONDERMESH_BASE_URL" ]]; then
         print -u2 "WONDERMESH_BASE_URL 尚未設定。"
@@ -159,7 +246,7 @@ run_test() {
       fi
       api_base="$WONDERMESH_BASE_URL"
       ;;
-    *) print -u2 "未知測試目標：$target（可用 local 或 origin）"; exit 2 ;;
+    *) print -u2 "未知測試目標：$target（可用 local、direct 或 origin）"; exit 2 ;;
   esac
 
   local -a curl_args
@@ -201,15 +288,64 @@ setup_tools() {
   print "工具環境已完成。"
 }
 
+show_request_logs() {
+  local once="${1:-}"
+  if ! command -v jq >/dev/null 2>&1; then
+    print -u2 "需要 jq 才能顯示 request logs。"
+    exit 1
+  fi
+  local endpoint="http://${GATEWAY_CONNECT_HOST}:${GATEWAY_PORT}/__mlx/requests"
+  while true; do
+    local snapshot
+    snapshot="$(curl -sS --max-time 3 "$endpoint" 2>/dev/null || true)"
+    if [[ -z "$snapshot" ]]; then
+      print -u2 "無法連線 MLX gateway：$endpoint"
+      exit 1
+    fi
+    [[ "$once" != "--once" ]] && printf '\033[2J\033[H'
+    print -r -- "$snapshot" | jq -r '
+      "MLX Request Log  running=\(.summary.running) waiting=\(.summary.waiting) parallel=\(.summary.parallel_limit)",
+      "",
+      "ACTIVE",
+      (if (.active | length) == 0 then "  （目前沒有推理請求）" else
+        .active[] | "  \(.state | ascii_upcase)  \(.request_id[0:8])  \(.path)  elapsed=\((.elapsed_ms / 1000 * 10 | round) / 10)s  ttft=\(if .ttft_ms == null then "—" else ((.ttft_ms / 1000 * 10 | round) / 10 | tostring) + "s" end)  rate=\(if .output_chunks_per_second == null then "—" else ((.output_chunks_per_second * 100 | round) / 100 | tostring) + " chunks/s" end)" end),
+      "",
+      "RECENT",
+      (if (.recent | length) == 0 then "  （尚無完成紀錄）" else
+        .recent[0:12][] | "  \(if .event == "completed" then "DONE  " elif .event == "cancelled" then "CANCEL" else "FAILED" end)  \(.request_id[0:8])  HTTP \(.status)  latency=\((.latency_ms / 1000 * 10 | round) / 10)s  tokens=\(.prompt_tokens // "—")+\(.completion_tokens // "—")  throughput=\(if .throughput_tps != null then (.throughput_tps | tostring) + " tok/s" elif .stream_chunks_per_second != null then "~" + (.stream_chunks_per_second | tostring) + " chunks/s" else "—" end)" end)
+    '
+    [[ "$once" == "--once" ]] && return 0
+    sleep 2
+  done
+}
+
 command_name="${1:-help}"
 shift || true
 case "$command_name" in
-  start) start_server ;;
-  stop) stop_server ;;
-  restart) stop_server; start_server ;;
+  start)
+    if [[ "${1:-}" == "gateway" ]]; then start_gateway; else start_server; fi
+    ;;
+  stop)
+    if [[ "${1:-}" == "gateway" ]]; then stop_gateway; else stop_server; fi
+    ;;
+  restart)
+    if [[ "${1:-}" == "gateway" ]]; then
+      stop_gateway
+      start_gateway
+    else
+      stop_server
+      start_server
+    fi
+    ;;
   status) show_status ;;
   test) run_test "${1:-local}" ;;
-  logs) touch "$LOG_FILE"; tail -n 100 -f "$LOG_FILE" ;;
+  logs)
+    case "${1:-engine}" in
+      engine) touch "$LOG_FILE"; tail -n 100 -f "$LOG_FILE" ;;
+      requests) show_request_logs "${2:-}" ;;
+      *) print -u2 "未知 log 類型：${1:-}（可用 engine 或 requests）"; exit 2 ;;
+    esac
+    ;;
   download) download_model ;;
   setup) setup_tools ;;
   help|-h|--help) usage ;;

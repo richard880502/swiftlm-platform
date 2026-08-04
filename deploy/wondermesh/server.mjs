@@ -2,7 +2,7 @@ import http from "node:http";
 
 const listenPort = Number(process.env.PORT || 8080);
 const upstreamHost = process.env.UPSTREAM_HOST || "192.168.5.2";
-const upstreamPort = Number(process.env.UPSTREAM_PORT || 18123);
+const upstreamPort = Number(process.env.UPSTREAM_PORT || 18124);
 
 const server = http.createServer((request, response) => {
   const headers = { ...request.headers, host: `${upstreamHost}:${upstreamPort}` };

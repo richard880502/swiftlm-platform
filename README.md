@@ -13,7 +13,8 @@ cd ~/Desktop/mlx-server
 ./mlx start
 ./mlx status
 ./mlx test
-./mlx logs
+./mlx logs engine
+./mlx logs requests
 ./mlx stop
 ```
 
@@ -30,7 +31,8 @@ cd ~/Desktop/mlx-server
 
 ## 網址
 
-- 本機：`http://127.0.0.1:18123/v1`
+- 本機 Gateway：`http://127.0.0.1:18124/v1`
+- SwiftLM Direct（內部）：`http://127.0.0.1:18123/v1`
 - Client API：`https://richard-swiftlm.zeabur.app/v1`
 - SwiftLM origin：`https://richard-swiftlm-origin-7165.zeabur.app/v1`
 
@@ -42,9 +44,24 @@ Client API 使用 Dashboard 產生的 `sk-mlx-...` key。Origin 只供 Dashboard
 - `mlx`：唯一管理指令。
 - `common.sh`：共用設定與模型路徑解析。
 - `swiftlm-runtime/`：SwiftLM binary 與 Metal runtime。
+- `mlx-gateway/`：統一入口、推理佇列、request ID 與結構化效能紀錄。
 - `dashboard/`：Zeabur Dashboard、API gateway、聊天及 request history。
 - `deploy/wondermesh/`：Wonder Mesh relay 部署檔。
 - `.state/`：PID 與後台日誌。
+
+## 兩種日誌
+
+```zsh
+./mlx logs engine
+```
+
+顯示 SwiftLM／Metal 原始輸出，適合診斷模型與崩潰；併發輸出的文字可能交錯。
+
+```zsh
+./mlx logs requests
+```
+
+顯示經過 MLX Gateway 的 running、waiting、queue time、TTFT、tokens 與 throughput。每個請求都有獨立 request ID，不保存提示詞或完整回答。
 
 模型保存在 `.cache/huggingface/`，目前使用的下載工具環境是 `.venv/`。
 

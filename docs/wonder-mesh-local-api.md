@@ -41,7 +41,8 @@ flowchart LR
     Mesh["Wonder Mesh Gateway"]
     Node["Node 1162<br/>100.64.0.79:30844"]
     Relay["socat relay<br/>service port 8080"]
-    SwiftLM["Mac SwiftLM<br/>192.168.5.2:18123"]
+    MLXGateway["Mac MLX Gateway<br/>192.168.5.2:18124<br/>queue · metrics · request ID"]
+    SwiftLM["Mac SwiftLM<br/>127.0.0.1:18123"]
     Data[("Zeabur volume<br/>/data")]
 
     Client -->|"Bearer sk-mlx-…"| Public
@@ -51,7 +52,7 @@ flowchart LR
     Origin --> Mesh
     Mesh --> Node
     Node --> Relay
-    Relay --> SwiftLM
+    Relay --> MLXGateway --> SwiftLM
 ```
 
 Client domain 與 origin domain 必須不同。若 Dashboard 的 `UPSTREAM_BASE_URL` 指回自己的 client domain，請求會形成無限代理迴圈。
@@ -60,6 +61,7 @@ Client domain 與 origin domain 必須不同。若 Dashboard 的 `UPSTREAM_BASE_
 
 | 元件 | 責任 | 不應負責 |
 |---|---|---|
+| MLX Gateway | 所有 HTTP 流量、推理佇列、request ID、結構化效能紀錄 | 執行模型權重、保存提示詞與回答 |
 | 本機 API | 實際運算、模型推理或商業邏輯 | 公開 TLS、客戶 key 管理 |
 | TCP relay | 將 mesh port 轉送到本機 IP/port | 驗證、修改 request body |
 | Wonder Mesh | 建立雲端與本機之間的私人網路 | 執行模型或保存聊天 |
@@ -74,7 +76,8 @@ Client domain 與 origin domain 必須不同。若 Dashboard 的 `UPSTREAM_BASE_
 | 設定 | SwiftLM 範例 | 說明 |
 |---|---|---|
 | Listen address | `0.0.0.0` | VM/relay 必須能連入；必須搭配驗證與防火牆 |
-| Local port | `18123` | 本機 API port |
+| Gateway port | `18124` | Wonder Mesh 與一般本機 client 的唯一入口 |
+| SwiftLM direct port | `18123` | 只供本機 gateway 轉送與底層診斷 |
 | Private host | `192.168.5.2` | Wonder Mesh VM 可到達的 Mac 位址 |
 | Health/smoke path | `/v1/models` | 不只檢查 port，也檢查應用層 |
 | Authentication | Bearer master key | 保存在 macOS Keychain |
@@ -109,14 +112,14 @@ source:
     - -d
     - -d
     - TCP-LISTEN:8080,fork,reuseaddr
-    - TCP:192.168.5.2:18123
+    - TCP:192.168.5.2:18124
 ```
 
 調整其他服務時只需要替換：
 
 - `8080`：relay container 的 listen port。
 - `192.168.5.2`：Wonder Mesh VM 能到達的本機 private IP。
-- `18123`：本機 API port。
+- `18124`：本機 MLX Gateway port；不要直接指向 SwiftLM 18123，否則請求不會進入統一佇列與 request logs。
 
 Relay image 必須同時支援 ARM64 與 AMD64。`alpine/socat:1.8.0.3` 是目前驗證可用的 multi-architecture image。
 
@@ -139,7 +142,7 @@ Relay image 必須同時支援 ARM64 與 AMD64。`alpine/socat:1.8.0.3` 是目�
 | Node ID | `1162` |
 | Mesh IP | `100.64.0.79` |
 | Mesh port | `30844` |
-| Relay destination | `192.168.5.2:18123` |
+| Relay destination | `192.168.5.2:18124` |
 
 Node ID、mesh IP 與 port 都可能在重建後改變；每次寫入 route 前必須重新讀取 live state。
 
@@ -328,7 +331,8 @@ flowchart TD
 | 項目 | 目前值 |
 |---|---|
 | Local project | `~/Desktop/mlx-server` |
-| Local model API | `http://127.0.0.1:18123/v1` |
+| Local gateway API | `http://127.0.0.1:18124/v1` |
+| SwiftLM direct API | `http://127.0.0.1:18123/v1` |
 | Client API | `https://richard-swiftlm.zeabur.app/v1` |
 | SwiftLM origin | `https://richard-swiftlm-origin-7165.zeabur.app/v1` |
 | Wonder Mesh node | `1162` / `lima-zeabur-mesh` |
