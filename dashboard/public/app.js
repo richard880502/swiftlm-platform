@@ -5,6 +5,7 @@ const state = {
   sending: false,
   query: "",
   generationPollTimer: null,
+  statusPollTimer: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -139,6 +140,8 @@ async function showApp() {
 }
 
 async function refreshStatus() {
+  clearTimeout(state.statusPollTimer);
+  state.statusPollTimer = null;
   elements.statusPill.className = "status-pill checking";
   elements.statusText.textContent = "檢查模型";
   elements.sidebarStatusText.textContent = "正在檢查…";
@@ -151,6 +154,7 @@ async function refreshStatus() {
     elements.statusPill.className = "status-pill offline";
     elements.statusText.textContent = "模型離線";
     elements.sidebarStatusText.textContent = "無法連線";
+    state.statusPollTimer = setTimeout(refreshStatus, 5000);
   }
 }
 
@@ -501,6 +505,8 @@ elements.loginForm.addEventListener("submit", async (event) => {
 
 elements.logoutButton.addEventListener("click", async () => {
   await request("/api/auth/logout", { method: "POST" });
+  clearTimeout(state.statusPollTimer);
+  state.statusPollTimer = null;
   stopGenerationPolling();
   state.current = null;
   showLogin();
