@@ -1,3 +1,5 @@
+import { clearComposerInput, shouldSubmitComposer } from "./composer.js";
+
 const state = {
   conversations: [],
   current: null,
@@ -312,8 +314,7 @@ async function sendMessage(event) {
   state.current.generation_in_progress = true;
   elements.sendButton.disabled = true;
   elements.deleteConversationButton.disabled = true;
-  elements.messageInput.value = "";
-  resizeComposer();
+  clearComposerInput(elements.messageInput);
   state.current.messages.push({ role: "user", content, created_at: new Date().toISOString() });
   renderMessages();
   elements.messageList.insertAdjacentHTML("beforeend", messageHtml({ role: "assistant", content: "" }, true));
@@ -531,7 +532,7 @@ elements.conversationSearch.addEventListener("input", () => {
 elements.composer.addEventListener("submit", sendMessage);
 elements.messageInput.addEventListener("input", resizeComposer);
 elements.messageInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.shiftKey) {
+  if (shouldSubmitComposer(event)) {
     event.preventDefault();
     elements.composer.requestSubmit();
   }
