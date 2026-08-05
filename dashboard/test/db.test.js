@@ -7,9 +7,9 @@ import { DatabaseSync } from "node:sqlite";
 import { createStore } from "../src/db.js";
 
 const defaultNode = {
-  id: "macbook-air",
-  name: "MacBook Air",
-  originBaseUrl: "https://macbook-air-origin.example/v1",
+  id: "mac-mini",
+  name: "Mac mini",
+  originBaseUrl: "https://mac-mini-origin.example/v1",
   modelId: "majentik/qwen-test",
   modelName: "Qwen Test",
 };

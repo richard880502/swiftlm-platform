@@ -34,7 +34,8 @@ export function loadConfig() {
     modelId,
     defaultNode: {
       id: nodeIdFromEnv("DEFAULT_NODE_ID", "richard-macbook-air"),
-      name: process.env.DEFAULT_NODE_NAME?.trim() || "Richard MacBook Air",
+      // Keep the historical node ID stable so existing keys and conversations keep routing correctly.
+      name: process.env.DEFAULT_NODE_NAME?.trim() || "Richard Mac mini",
       originBaseUrl: required("UPSTREAM_BASE_URL").replace(/\/$/, ""),
       modelId,
       modelName: process.env.MODEL_DISPLAY_NAME?.trim() || modelId,
