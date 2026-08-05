@@ -2,6 +2,7 @@ import { clearComposerInput, shouldSubmitComposer } from "./composer.js";
 
 const state = {
   conversations: [],
+  nodes: [],
   current: null,
   currentView: "chat",
   sending: false,
@@ -26,6 +27,7 @@ const elements = {
   chatWorkspace: $("#chatWorkspace"),
   activityWorkspace: $("#activityWorkspace"),
   keysWorkspace: $("#keysWorkspace"),
+  nodesWorkspace: $("#nodesWorkspace"),
   viewEyebrow: $("#viewEyebrow"),
   viewTitle: $("#viewTitle"),
   viewDescription: $("#viewDescription"),
@@ -38,6 +40,8 @@ const elements = {
   sendButton: $("#sendButton"),
   thinkingToggle: $("#thinkingToggle"),
   maxTokens: $("#maxTokens"),
+  conversationNode: $("#conversationNode"),
+  conversationModel: $("#conversationModel"),
   statusPill: $("#statusPill"),
   statusText: $("#statusText"),
   sidebarStatusText: $("#sidebarStatusText"),
@@ -49,7 +53,18 @@ const elements = {
   keyReveal: $("#keyReveal"),
   createKeyForm: $("#createKeyForm"),
   keyName: $("#keyName"),
+  keyNode: $("#keyNode"),
   keyList: $("#keyList"),
+  nodeCount: $("#nodeCount"),
+  onlineNodeCount: $("#onlineNodeCount"),
+  availableModelCount: $("#availableModelCount"),
+  nodeList: $("#nodeList"),
+  refreshNodesButton: $("#refreshNodesButton"),
+  createNodeForm: $("#createNodeForm"),
+  nodeName: $("#nodeName"),
+  nodeModelName: $("#nodeModelName"),
+  nodeModelId: $("#nodeModelId"),
+  nodeOrigin: $("#nodeOrigin"),
   toast: $("#toast"),
 };
 
@@ -68,6 +83,11 @@ const viewCopy = {
     eyebrow: "ACCESS MANAGEMENT",
     title: "API Keys",
     description: "建立與管理可呼叫 OpenAI 相容端點的存取金鑰。",
+  },
+  nodes: {
+    eyebrow: "MODEL NODES",
+    title: "機器",
+    description: "管理可透過 Wonder Mesh 存取的 SwiftLM 模型節點。",
   },
 };
 
@@ -133,7 +153,7 @@ function showLogin() {
 async function showApp() {
   elements.loginView.classList.add("hidden");
   elements.appView.classList.remove("hidden");
-  await Promise.all([loadConversations(), refreshStatus()]);
+  await Promise.all([loadConversations(), loadNodes()]);
   switchView("chat");
   const lastConversationId = localStorage.getItem("swiftlm:lastConversation");
   if (lastConversationId && state.conversations.some(({ id }) => id === lastConversationId)) {
@@ -141,22 +161,65 @@ async function showApp() {
   }
 }
 
-async function refreshStatus() {
+function currentNode() {
+  return state.nodes.find((node) => node.id === state.current?.node_id) || state.nodes[0] || null;
+}
+
+function renderNodeOptions() {
+  const enabled = state.nodes.filter((node) => node.enabled);
+  const selectedId = state.current?.node_id || enabled[0]?.id || "";
+  const options = enabled.map((node) => `<option value="${escapeHtml(node.id)}">${escapeHtml(node.name)}</option>`).join("");
+  elements.conversationNode.innerHTML = options;
+  elements.keyNode.innerHTML = options;
+  elements.conversationNode.value = selectedId;
+  elements.keyNode.value = selectedId;
+  renderModelOptions(selectedId);
+}
+
+function renderModelOptions(nodeId = elements.conversationNode.value) {
+  const node = state.nodes.find((item) => item.id === nodeId);
+  const value = node?.model_id || "";
+  elements.conversationModel.innerHTML = node
+    ? `<option value="${escapeHtml(value)}">${escapeHtml(node.model_name)}</option>`
+    : "";
+  elements.conversationModel.value = state.current?.model_id === value ? value : value;
+}
+
+function updateNodeStatus() {
+  const node = currentNode();
+  const online = state.nodes.filter((item) => item.status?.state === "online").length;
+  elements.sidebarStatusText.textContent = state.nodes.length
+    ? `${online} / ${state.nodes.length} 台已連線`
+    : "尚未加入機器";
   clearTimeout(state.statusPollTimer);
-  state.statusPollTimer = null;
+  state.statusPollTimer = setTimeout(loadNodes, 5000);
   elements.statusPill.className = "status-pill checking";
   elements.statusText.textContent = "檢查模型";
-  elements.sidebarStatusText.textContent = "正在檢查…";
-  try {
-    const result = await request("/api/status");
+  if (node?.status?.state === "online") {
     elements.statusPill.className = "status-pill online";
-    elements.statusText.textContent = `模型在線 · ${result.latency_ms}ms`;
-    elements.sidebarStatusText.textContent = "已連線";
-  } catch {
+    elements.statusText.textContent = `${node.name} · ${node.status.latency_ms}ms`;
+  } else if (node?.status?.state === "disabled") {
+    elements.statusPill.className = "status-pill checking";
+    elements.statusText.textContent = `${node.name} · 已停用`;
+  } else if (node) {
     elements.statusPill.className = "status-pill offline";
-    elements.statusText.textContent = "模型離線";
-    elements.sidebarStatusText.textContent = "無法連線";
-    state.statusPollTimer = setTimeout(refreshStatus, 5000);
+    elements.statusText.textContent = `${node.name} · 模型離線`;
+  } else {
+    elements.statusPill.className = "status-pill offline";
+    elements.statusText.textContent = "尚未加入機器";
+  }
+}
+
+async function loadNodes() {
+  try {
+    const result = await request("/api/nodes");
+    state.nodes = result.data || [];
+    renderNodeOptions();
+    updateNodeStatus();
+    if (state.currentView === "nodes") renderNodes();
+  } catch {
+    state.nodes = [];
+    updateNodeStatus();
   }
 }
 
@@ -192,13 +255,20 @@ function renderConversationList() {
 }
 
 async function createConversation() {
-  const conversation = await request("/api/conversations", {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
-  switchView("chat");
-  await loadConversations(conversation.id);
-  elements.messageInput.focus();
+  const node = (state.current && state.nodes.find((item) => item.id === state.current.node_id && item.enabled))
+    || state.nodes.find((item) => item.enabled);
+  if (!node) return showToast("請先在「機器」加入可用的模型節點");
+  try {
+    const conversation = await request("/api/conversations", {
+      method: "POST",
+      body: JSON.stringify({ node_id: node.id, model_id: node.model_id }),
+    });
+    switchView("chat");
+    await loadConversations(conversation.id);
+    elements.messageInput.focus();
+  } catch (error) {
+    showToast(error.message);
+  }
 }
 
 async function selectConversation(id) {
@@ -209,6 +279,7 @@ async function selectConversation(id) {
   elements.emptyState.classList.add("hidden");
   elements.chatView.classList.remove("hidden");
   updateConversationHeader();
+  renderNodeOptions();
   renderConversationList();
   renderMessages();
   scheduleGenerationPolling();
@@ -219,11 +290,14 @@ function updateConversationHeader() {
   elements.viewTitle.textContent = state.current.title;
   elements.viewDescription.textContent = state.current.generation_in_progress
     ? "模型仍在生成 · 完成後會自動更新"
-    : `${state.current.messages.length} 則訊息 · 更新於 ${formatDate(state.current.updated_at)}`;
+    : `${state.current.node_name} · ${state.current.model_name} · ${state.current.messages.length} 則訊息`;
   elements.deleteConversationButton.classList.remove("hidden");
   elements.deleteConversationButton.disabled = busy;
   elements.sendButton.disabled = busy;
   elements.messageInput.disabled = busy;
+  const targetLocked = busy || state.current.messages.length > 0;
+  elements.conversationNode.disabled = targetLocked;
+  elements.conversationModel.disabled = targetLocked;
 }
 
 function stopGenerationPolling() {
@@ -377,7 +451,7 @@ async function sendMessage(event) {
     state.current.generation_in_progress = false;
     pending.classList.remove("pending");
     output.textContent = `請求失敗：${error.message}`;
-    await refreshStatus();
+    await loadNodes();
   } finally {
     state.sending = false;
     const stillGenerating = Boolean(state.current?.generation_in_progress);
@@ -400,6 +474,7 @@ function switchView(type, options = {}) {
   elements.chatWorkspace.classList.toggle("hidden", type !== "chat");
   elements.activityWorkspace.classList.toggle("hidden", type !== "activity");
   elements.keysWorkspace.classList.toggle("hidden", type !== "keys");
+  elements.nodesWorkspace.classList.toggle("hidden", type !== "nodes");
   elements.conversationSection.classList.toggle("view-muted", type !== "chat");
   elements.deleteConversationButton.classList.toggle("hidden", type !== "chat" || !state.current);
   document.querySelectorAll("[data-view]").forEach((button) => {
@@ -408,6 +483,7 @@ function switchView(type, options = {}) {
   if (!options.preserveTitle) applyViewCopy(type);
   if (type === "activity") renderActivity();
   if (type === "keys") renderKeys();
+  if (type === "nodes") renderNodes();
 }
 
 async function renderActivity() {
@@ -432,7 +508,7 @@ async function renderActivity() {
           <span class="request-indicator ${success ? "success" : "failed"}" aria-hidden="true"></span>
           <div class="activity-main">
             <div class="activity-title"><strong>${escapeHtml(entry.route)}</strong><span>${formatDate(entry.created_at)}</span></div>
-            <p>${escapeHtml(entry.api_key_name || "Dashboard")} · ${tokens}</p>
+            <p>${escapeHtml(entry.node_name || "未指定機器")} · ${escapeHtml(entry.model_name || entry.model || "模型")} · ${escapeHtml(entry.api_key_name || "Dashboard")} · ${tokens}</p>
             ${entry.response_preview ? `<p class="response-preview">${escapeHtml(entry.response_preview.slice(0, 180))}</p>` : ""}
           </div>
           <div class="activity-metrics"><strong>${entry.status}</strong><span>${formatNumber(entry.latency_ms)} ms</span></div>
@@ -470,7 +546,7 @@ async function renderKeys(revealedKey) {
         <div class="key-main">
           <div class="key-title"><strong>${escapeHtml(key.name)}</strong>${key.revoked_at ? '<span class="state-label">已撤銷</span>' : '<span class="state-label active">使用中</span>'}</div>
           <code>${escapeHtml(key.prefix)}••••••••••••••••</code>
-          <p>建立於 ${formatDate(key.created_at)} · 最近使用 ${formatDate(key.last_used_at)}</p>
+          <p>${escapeHtml(key.node_name)} · ${escapeHtml(key.model_name)} · 建立於 ${formatDate(key.created_at)} · 最近使用 ${formatDate(key.last_used_at)}</p>
         </div>
         ${key.revoked_at ? "" : `<button class="danger-button" data-revoke-key="${key.id}">撤銷</button>`}
       </article>
@@ -486,6 +562,70 @@ async function renderKeys(revealedKey) {
     });
   } catch (error) {
     elements.keyList.innerHTML = `<div class="empty-list error"><strong>載入失敗</strong><span>${escapeHtml(error.message)}</span></div>`;
+  }
+}
+
+function renderNodes() {
+  const nodes = state.nodes || [];
+  const online = nodes.filter((node) => node.status?.state === "online").length;
+  const available = nodes.filter((node) => node.enabled).length;
+  elements.nodeCount.textContent = formatNumber(nodes.length);
+  elements.onlineNodeCount.textContent = `${formatNumber(online)} / ${formatNumber(nodes.length)}`;
+  elements.availableModelCount.textContent = formatNumber(available);
+  elements.nodeList.innerHTML = nodes.length ? nodes.map((node) => {
+    const stateName = node.status?.state === "online" ? "在線"
+      : node.status?.state === "disabled" ? "已停用" : "離線";
+    const latency = node.status?.latency_ms == null ? "—" : `${formatNumber(node.status.latency_ms)} ms`;
+    return `
+      <article class="node-row ${node.enabled ? "" : "disabled"}">
+        <span class="node-indicator ${escapeHtml(node.status?.state || "offline")}" aria-hidden="true"></span>
+        <div class="node-main">
+          <div class="node-title"><strong>${escapeHtml(node.name)}</strong><span class="state-label ${node.status?.state === "online" ? "active" : ""}">${stateName}</span></div>
+          <p>${escapeHtml(node.model_name)} · ${escapeHtml(node.model_id)}</p>
+          <small>最後檢查 ${formatDate(node.status?.checked_at)} · ${latency}</small>
+        </div>
+        <button class="${node.enabled ? "danger-button" : "toolbar-button"}" data-toggle-node="${escapeHtml(node.id)}" data-node-enabled="${node.enabled ? "0" : "1"}">
+          ${node.enabled ? "停用" : "啟用"}
+        </button>
+      </article>
+    `;
+  }).join("") : '<div class="empty-list"><strong>尚未加入機器</strong><span>加入已透過 Wonder Mesh 發布的 SwiftLM Origin。</span></div>';
+
+  elements.nodeList.querySelectorAll("[data-toggle-node]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const enabled = button.dataset.nodeEnabled === "1";
+      try {
+        await request(`/api/nodes/${button.dataset.toggleNode}/enabled`, {
+          method: "POST", body: JSON.stringify({ enabled }),
+        });
+        await loadNodes();
+        showToast(enabled ? "機器已啟用" : "機器已停用");
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+}
+
+async function updateConversationTarget() {
+  if (!state.current || state.current.messages.length > 0 || state.sending || state.current.generation_in_progress) {
+    renderNodeOptions();
+    return;
+  }
+  const node = state.nodes.find((item) => item.id === elements.conversationNode.value);
+  if (!node) return;
+  try {
+    state.current = await request(`/api/conversations/${state.current.id}/target`, {
+      method: "PATCH",
+      body: JSON.stringify({ node_id: node.id, model_id: node.model_id }),
+    });
+    renderNodeOptions();
+    updateConversationHeader();
+    renderConversationList();
+    updateNodeStatus();
+  } catch (error) {
+    renderNodeOptions();
+    showToast(error.message);
   }
 }
 
@@ -520,10 +660,35 @@ elements.createKeyForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const created = await request("/api/keys", {
     method: "POST",
-    body: JSON.stringify({ name: elements.keyName.value }),
+    body: JSON.stringify({ name: elements.keyName.value, node_id: elements.keyNode.value }),
   });
   elements.keyName.value = "";
   await renderKeys(created.key);
+});
+elements.conversationNode.addEventListener("change", async () => {
+  renderModelOptions(elements.conversationNode.value);
+  await updateConversationTarget();
+});
+elements.conversationModel.addEventListener("change", updateConversationTarget);
+elements.refreshNodesButton.addEventListener("click", loadNodes);
+elements.createNodeForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await request("/api/nodes", {
+      method: "POST",
+      body: JSON.stringify({
+        name: elements.nodeName.value,
+        model_name: elements.nodeModelName.value,
+        model_id: elements.nodeModelId.value,
+        origin_base_url: elements.nodeOrigin.value,
+      }),
+    });
+    elements.createNodeForm.reset();
+    await loadNodes();
+    showToast("機器已加入，正在檢查模型狀態");
+  } catch (error) {
+    showToast(error.message);
+  }
 });
 elements.conversationSearch.addEventListener("input", () => {
   state.query = elements.conversationSearch.value;

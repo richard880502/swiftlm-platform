@@ -15,7 +15,7 @@ import { createStore } from "./db.js";
 import { preview, proxyOpenAI, streamDashboardChat, upstreamJson } from "./proxy.js";
 
 const config = loadConfig();
-const store = createStore(config.databasePath);
+const store = createStore(config.databasePath, { defaultNode: config.defaultNode });
 const app = express();
 const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public");
 const loginAttempts = new Map();
@@ -76,8 +76,61 @@ function secureCookie(req, value, maxAgeSeconds) {
   return attributes.join("; ");
 }
 
+function safeNodeId(value) {
+  const id = String(value || "").trim();
+  return /^[a-z0-9][a-z0-9_-]{1,62}$/i.test(id) ? id : "";
+}
+
+function normalizedOrigin(value) {
+  try {
+    const url = new URL(String(value || "").trim());
+    if (!["https:", "http:"].includes(url.protocol) || !url.hostname) return "";
+    const pathname = url.pathname.replace(/\/+$/, "");
+    if (pathname !== "/v1") return "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+async function checkNode(node) {
+  const started = Date.now();
+  if (!node.enabled) {
+    return { state: "disabled", ok: false, latency_ms: null, checked_at: new Date().toISOString() };
+  }
+  try {
+    const upstream = await upstreamJson(config, node, "/models", undefined, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    return {
+      state: upstream.response.ok ? "online" : "offline",
+      ok: upstream.response.ok,
+      upstream_status: upstream.response.status,
+      latency_ms: Date.now() - started,
+      checked_at: new Date().toISOString(),
+    };
+  } catch (error) {
+    return {
+      state: "offline",
+      ok: false,
+      error: error.message,
+      latency_ms: Date.now() - started,
+      checked_at: new Date().toISOString(),
+    };
+  }
+}
+
+async function nodeWithStatus(node) {
+  return { ...node, status: await checkNode(node) };
+}
+
+function resolveEnabledNode(nodeId) {
+  const node = store.getNode(nodeId);
+  return node?.enabled ? node : null;
+}
+
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "swiftlm-dashboard", model: config.modelId });
+  res.json({ ok: true, service: "swiftlm-dashboard", default_node: config.defaultNode.id });
 });
 
 app.post("/api/auth/login", (req, res) => {
@@ -110,38 +163,68 @@ app.get("/api/auth/me", (req, res) => {
   res.status(adminSession(req) ? 200 : 401).json({ authenticated: adminSession(req) });
 });
 
-app.get("/api/status", requireAdmin, async (_req, res) => {
-  const started = Date.now();
-  try {
-    const upstream = await upstreamJson(config, "/models", undefined, {
-      signal: AbortSignal.timeout(15_000),
-    });
-    res.status(upstream.response.ok ? 200 : 502).json({
-      ok: upstream.response.ok,
-      upstream_status: upstream.response.status,
-      latency_ms: Date.now() - started,
-      model: config.modelId,
-    });
-  } catch (error) {
-    res.status(502).json({ ok: false, error: error.message, latency_ms: Date.now() - started });
+app.get("/api/status", requireAdmin, async (req, res) => {
+  const node = store.getNode(safeNodeId(req.query.node_id) || config.defaultNode.id);
+  if (!node) return res.status(404).json({ error: { message: "Node not found" } });
+  const result = await nodeWithStatus(node);
+  res.status(result.status.ok ? 200 : 502).json(result);
+});
+
+app.get("/api/nodes", requireAdmin, async (_req, res) => {
+  const nodes = store.listNodes();
+  res.json({ data: await Promise.all(nodes.map(nodeWithStatus)) });
+});
+
+app.post("/api/nodes", requireAdmin, (req, res) => {
+  const name = String(req.body?.name || "").trim().slice(0, 80);
+  const modelId = String(req.body?.model_id || "").trim().slice(0, 240);
+  const modelName = String(req.body?.model_name || modelId).trim().slice(0, 120);
+  const originBaseUrl = normalizedOrigin(req.body?.origin_base_url);
+  if (!name || !modelId || !modelName || !originBaseUrl) {
+    return res.status(400).json({ error: { message: "請填入機器名稱、模型與以 /v1 結尾的 Origin URL" } });
   }
+  try {
+    const node = store.createNode({ name, modelId, modelName, originBaseUrl });
+    return res.status(201).json(node);
+  } catch (error) {
+    return res.status(409).json({ error: { message: error.message.includes("UNIQUE") ? "這個 Origin URL 已存在" : "無法建立節點" } });
+  }
+});
+
+app.post("/api/nodes/:id/enabled", requireAdmin, (req, res) => {
+  const id = safeNodeId(req.params.id);
+  const node = store.getNode(id);
+  if (!node) return res.status(404).json({ error: { message: "Node not found" } });
+  const enabled = Boolean(req.body?.enabled);
+  if (id === config.defaultNode.id && !enabled) {
+    return res.status(400).json({ error: { message: "預設節點不可停用；請先設定另一個預設節點。" } });
+  }
+  store.setNodeEnabled(id, enabled);
+  return res.json(store.getNode(id));
 });
 
 app.get("/api/keys", requireAdmin, (_req, res) => res.json({ data: store.listApiKeys() }));
 
 app.post("/api/keys", requireAdmin, (req, res) => {
   const name = String(req.body?.name || "API Key").trim().slice(0, 80);
+  const nodeId = safeNodeId(req.body?.node_id) || config.defaultNode.id;
+  const node = resolveEnabledNode(nodeId);
+  if (!node) return res.status(400).json({ error: { message: "請選擇一台在線用的機器" } });
   const issued = issueApiKey();
   store.createApiKey({
     id: issued.id,
     name,
     prefix: issued.prefix,
     digest: hmacHex(config.keyHashSecret, issued.value),
+    nodeId: node.id,
   });
   res.status(201).json({
     id: issued.id,
     name,
     prefix: issued.prefix,
+    node_id: node.id,
+    node_name: node.name,
+    model_id: node.model_id,
     key: issued.value,
     warning: "This key is shown only once.",
   });
@@ -157,13 +240,38 @@ app.get("/api/conversations", requireAdmin, (_req, res) => {
 });
 
 app.post("/api/conversations", requireAdmin, (req, res) => {
+  const nodeId = safeNodeId(req.body?.node_id) || config.defaultNode.id;
+  const node = resolveEnabledNode(nodeId);
+  if (!node) return res.status(400).json({ error: { message: "請選擇一台可用的機器" } });
+  const modelId = String(req.body?.model_id || node.model_id).trim();
+  if (modelId !== node.model_id) {
+    return res.status(400).json({ error: { message: "這台機器未提供指定模型" } });
+  }
   const conversation = store.createConversation({
     title: String(req.body?.title || "新對話").trim().slice(0, 80),
     systemPrompt: String(
       req.body?.system_prompt || "你是一位專業助理，請使用繁體中文回答。",
     ).slice(0, 4000),
+    nodeId: node.id,
+    modelId,
   });
   res.status(201).json(conversation);
+});
+
+app.patch("/api/conversations/:id/target", requireAdmin, (req, res) => {
+  const conversation = store.getConversation(req.params.id);
+  if (!conversation) return res.status(404).json({ error: { message: "Conversation not found" } });
+  if (conversation.messages.length > 0) {
+    return res.status(409).json({ error: { message: "已有訊息的對話不能切換機器或模型，請建立新對話。" } });
+  }
+  const nodeId = safeNodeId(req.body?.node_id);
+  const node = resolveEnabledNode(nodeId);
+  const modelId = String(req.body?.model_id || "").trim();
+  if (!node || modelId !== node.model_id) {
+    return res.status(400).json({ error: { message: "機器或模型無法使用" } });
+  }
+  store.updateConversationTarget(conversation.id, node.id, modelId);
+  return res.json(store.getConversation(conversation.id));
 });
 
 app.get("/api/conversations/:id", requireAdmin, (req, res) => {
@@ -188,6 +296,10 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
   const content = String(req.body?.content || "").trim();
   if (!content) return res.status(400).json({ error: { message: "Message is required" } });
   if (content.length > 200_000) return res.status(413).json({ error: { message: "Message too large" } });
+  const node = resolveEnabledNode(conversation.node_id);
+  if (!node || conversation.model_id !== node.model_id) {
+    return res.status(503).json({ error: { message: "這台機器或模型目前無法使用" } });
+  }
 
   activeGenerations.add(conversation.id);
   try {
@@ -197,7 +309,7 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
     }
     const updated = store.getConversation(conversation.id);
     const requestBody = {
-      model: config.modelId,
+      model: node.model_id,
       messages: [
         { role: "system", content: updated.system_prompt },
         ...updated.messages.map(({ role, content: messageContent }) => ({ role, content: messageContent })),
@@ -212,6 +324,7 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
 
     await streamDashboardChat({
       config,
+      node,
       requestBody,
       response: res,
       onProgress: ({ assistant }) => {
@@ -222,7 +335,8 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
         const message = { ...assistantMessage, content: assistant };
         store.recordRequest({
           route: "/api/conversations/:id/messages",
-          model: config.modelId,
+          nodeId: node.id,
+          model: node.model_id,
           status: completed ? 200 : 502,
           latencyMs: Date.now() - started,
           promptTokens: usage?.prompt_tokens,

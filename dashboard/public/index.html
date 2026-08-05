@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#17191d" />
     <title>SwiftLM Console</title>
-    <link rel="stylesheet" href="/styles.css?v=3" />
+    <link rel="stylesheet" href="/styles.css?v=4" />
   </head>
   <body>
     <div class="wallpaper" aria-hidden="true">
@@ -62,6 +62,10 @@
             <span class="nav-icon key-icon" aria-hidden="true"></span>
             <span>API Keys</span>
           </button>
+          <button class="nav-button" data-view="nodes">
+            <span class="nav-icon node-icon" aria-hidden="true"></span>
+            <span>機器</span>
+          </button>
         </nav>
 
         <div id="conversationSection" class="conversation-section">
@@ -75,7 +79,7 @@
         <div class="sidebar-footer">
           <div class="model-mini-status">
             <span class="status-dot"></span>
-            <div><strong>本機模型</strong><span id="sidebarStatusText">正在檢查…</span></div>
+            <div><strong>模型節點</strong><span id="sidebarStatusText">正在檢查…</span></div>
           </div>
           <button id="logoutButton" class="logout-button">登出</button>
         </div>
@@ -115,6 +119,14 @@
               <textarea id="messageInput" rows="1" placeholder="傳送訊息給 SwiftLM…" required></textarea>
               <div class="composer-footer">
                 <div class="settings-row">
+                  <label>
+                    機器
+                    <select id="conversationNode"></select>
+                  </label>
+                  <label>
+                    模型
+                    <select id="conversationModel"></select>
+                  </label>
                   <label class="toggle">
                     <input id="thinkingToggle" type="checkbox" />
                     <span></span>
@@ -159,16 +171,42 @@
               <div><h3>存取金鑰</h3><p>每個應用程式使用獨立金鑰，方便日後撤銷與追蹤。</p></div>
               <form id="createKeyForm" class="key-create-form">
                 <input id="keyName" placeholder="金鑰名稱" maxlength="80" required />
+                <select id="keyNode" aria-label="選擇機器"></select>
                 <button class="primary" type="submit">建立 Key</button>
               </form>
             </div>
             <div id="keyList" class="key-list"></div>
           </div>
         </section>
+
+        <section id="nodesWorkspace" class="workspace-view management-view hidden">
+          <div class="summary-grid">
+            <article class="summary-card"><span>機器總數</span><strong id="nodeCount">—</strong><small>已加入 Dashboard</small></article>
+            <article class="summary-card"><span>模型在線</span><strong id="onlineNodeCount">—</strong><small>每 5 秒檢查一次</small></article>
+            <article class="summary-card"><span>可用模型</span><strong id="availableModelCount">—</strong><small>目前已啟用</small></article>
+          </div>
+          <div class="content-card">
+            <div class="content-card-header nodes-header">
+              <div><h3>模型機器</h3><p>每台機器都有自己的 Wonder Mesh Origin 與可用模型。</p></div>
+              <button id="refreshNodesButton" class="toolbar-button">重新整理狀態</button>
+            </div>
+            <div id="nodeList" class="node-list"></div>
+          </div>
+          <div class="content-card">
+            <div class="content-card-header"><div><h3>加入機器</h3><p>Origin URL 必須是該 SwiftLM 節點的私有 `/v1` 網址。</p></div></div>
+            <form id="createNodeForm" class="node-create-form">
+              <input id="nodeName" placeholder="機器名稱，例如 Mac Studio" maxlength="80" required />
+              <input id="nodeModelName" placeholder="顯示模型名稱" maxlength="120" required />
+              <input id="nodeModelId" placeholder="模型 ID，例如 majentik/Qwen3.6-35B…" maxlength="240" required />
+              <input id="nodeOrigin" type="url" placeholder="https://node-origin.zeabur.app/v1" required />
+              <button class="primary" type="submit">加入機器</button>
+            </form>
+          </div>
+        </section>
       </section>
     </main>
 
     <div id="toast" class="toast hidden" role="status"></div>
-    <script type="module" src="/app.js?v=6"></script>
+    <script type="module" src="/app.js?v=7"></script>
   </body>
 </html>

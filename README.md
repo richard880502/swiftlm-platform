@@ -1,6 +1,6 @@
 # SwiftLM Platform
 
-這是一個完整的本機 LLM API 平台：本機 Apple Silicon 負責模型推理，Zeabur Wonder Mesh 提供外網連線，Dashboard 負責客戶 API key、聊天與使用紀錄。
+這是一個完整的本機 LLM API 平台：本機 Apple Silicon 負責模型推理，Zeabur Wonder Mesh 提供外網連線，Dashboard 負責客戶 API key、聊天、使用紀錄與模型機器狀態。
 
 本機模型使用 SwiftLM 的 SSD expert streaming 執行：
 
@@ -72,3 +72,24 @@ Client API 使用 Dashboard 產生的 `sk-mlx-...` key。Origin 只供 Dashboard
 [本機 API 透過 Zeabur Wonder Mesh 對外服務](docs/wonder-mesh-local-api.md)
 
 Dashboard 的開發與部署方式請見 [dashboard/README.md](dashboard/README.md)。
+
+## 多機器 Dashboard
+
+Dashboard 把每一台已透過 Wonder Mesh 發布的 SwiftLM 視為一個「機器節點」。節點是明確選擇的，不做隱性自動分流：
+
+```mermaid
+flowchart LR
+    Client["使用者／應用程式"] -->|"Node 專用 Dashboard API Key"| Dashboard["SwiftLM Dashboard\n驗證、聊天、紀錄"]
+    Dashboard -->|"共用 SwiftLM Master Key"| OriginA["Node A Origin"]
+    Dashboard -->|"共用 SwiftLM Master Key"| OriginB["Node B Origin"]
+    OriginA --> GatewayA["Mac A MLX Gateway"] --> SwiftA["SwiftLM A"]
+    OriginB --> GatewayB["Mac B MLX Gateway"] --> SwiftB["SwiftLM B"]
+```
+
+- 管理員在 Dashboard 的「機器」加入一台機器名稱、模型與專屬 Origin `/v1` URL。
+- Dashboard 每 5 秒以 authenticated `/models` 檢查各節點是否在線；模型仍實際執行於本機。
+- 建立 API Key 時必須選擇機器；Key 只能呼叫該機器登記的模型。
+- 新對話可在尚未送出第一則訊息前選擇機器和模型；送出後固定目標，避免對話內容跨機器混用。
+- API request 與對話會保存 `node_id`、模型與狀態，方便從使用紀錄追查。
+
+SwiftLM Master Key 不會顯示給 Dashboard 使用者；它只存在於各 Mac 的 Keychain 與 Dashboard 的 Zeabur secret environment variable。

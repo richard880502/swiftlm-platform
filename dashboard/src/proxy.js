@@ -5,8 +5,12 @@ export function preview(value) {
   return text.length > PREVIEW_LIMIT ? `${text.slice(0, PREVIEW_LIMIT)}…` : text;
 }
 
-export async function upstreamJson(config, path, body, { signal } = {}) {
-  const response = await fetch(`${config.upstreamBaseUrl}${path}`, {
+function upstreamUrl(node, path) {
+  return `${node.origin_base_url}${path}`;
+}
+
+export async function upstreamJson(config, node, path, body, { signal } = {}) {
+  const response = await fetch(upstreamUrl(node, path), {
     method: body === undefined ? "GET" : "POST",
     headers: {
       Authorization: `Bearer ${config.upstreamApiKey}`,
@@ -25,14 +29,14 @@ export async function upstreamJson(config, path, body, { signal } = {}) {
   return { response, data, text };
 }
 
-export async function streamDashboardChat({ config, requestBody, response, onProgress, onComplete }) {
+export async function streamDashboardChat({ config, node, requestBody, response, onProgress, onComplete }) {
   let clientConnected = true;
   let completionAttempted = false;
   response.on("close", () => {
     clientConnected = false;
   });
 
-  const upstream = await fetch(`${config.upstreamBaseUrl}/chat/completions`, {
+  const upstream = await fetch(upstreamUrl(node, "/chat/completions"), {
     method: "POST",
     headers: {
       Authorization: `Bearer ${config.upstreamApiKey}`,
@@ -136,17 +140,24 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
   let status = 502;
   let responsePreview = "";
   let usage = null;
+  const node = {
+    id: apiKey.node_id,
+    name: apiKey.node_name,
+    origin_base_url: apiKey.origin_base_url,
+    model_id: apiKey.model_id,
+    model_name: apiKey.model_name,
+  };
 
   try {
     if (route === "/models") {
-      const upstream = await upstreamJson(config, "/models");
+      const upstream = await upstreamJson(config, node, "/models");
       status = upstream.response.status;
       responsePreview = upstream.text;
       if (!upstream.response.ok) return res.status(status).json(upstream.data);
       return res.json({
         object: "list",
         data: [{
-          id: config.modelId,
+          id: node.model_id,
           object: "model",
           created: 0,
           owned_by: "local-swiftlm",
@@ -154,14 +165,26 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
       });
     }
 
-    const upstream = await fetch(`${config.upstreamBaseUrl}${route}`, {
+    if (route === "/chat/completions" && body?.model && body.model !== node.model_id) {
+      status = 400;
+      responsePreview = `Model is not available on ${node.name}`;
+      return res.status(400).json({
+        error: {
+          message: `This API key is restricted to ${node.model_id} on ${node.name}`,
+          type: "invalid_request_error",
+          code: "model_not_available",
+        },
+      });
+    }
+
+    const upstream = await fetch(upstreamUrl(node, route), {
       method: req.method,
       headers: {
         Authorization: `Bearer ${config.upstreamApiKey}`,
         "Content-Type": "application/json",
         Accept: req.headers.accept || "application/json",
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(route === "/chat/completions" ? { ...body, model: node.model_id } : body),
     });
     status = upstream.status;
     res.status(status);
@@ -207,8 +230,9 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
   } finally {
     store.recordRequest({
       apiKeyId: apiKey.id,
+      nodeId: node.id,
       route: req.path,
-      model: body?.model || config.modelId,
+      model: node.model_id,
       status,
       latencyMs: Date.now() - started,
       promptTokens: usage?.prompt_tokens,

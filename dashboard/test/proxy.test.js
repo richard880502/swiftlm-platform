@@ -54,9 +54,9 @@ test("dashboard generation is fully persisted after the browser disconnects", as
   const progress = [];
   await streamDashboardChat({
     config: {
-      upstreamBaseUrl: `http://127.0.0.1:${address.port}`,
       upstreamApiKey: "test-only",
     },
+    node: { origin_base_url: `http://127.0.0.1:${address.port}` },
     requestBody: { messages: [] },
     response,
     onProgress: ({ assistant }) => progress.push(assistant),

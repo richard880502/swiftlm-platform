@@ -30,29 +30,33 @@ flowchart LR
 
 ### 1.2 加入 Dashboard API Gateway
 
-目前 SwiftLM 使用這個模式。客戶只拿到 Dashboard 發行的 key，本機 SwiftLM master key 不會交給客戶。
+目前 SwiftLM 使用這個模式。客戶只拿到 Dashboard 發行、並且綁定指定機器的 key；本機 SwiftLM master key 不會交給客戶。
 
 ```mermaid
 flowchart LR
-    Client["OpenAI client<br/>Dashboard API key"]
+    Client["OpenAI client<br/>Node-scoped Dashboard API key"]
     Public["Client API<br/>richard-swiftlm.zeabur.app"]
-    Dashboard["Dashboard Gateway<br/>auth · rate/audit · history"]
-    Origin["SwiftLM Origin<br/>richard-swiftlm-origin-7165.zeabur.app"]
+    Dashboard["Dashboard Gateway<br/>auth · node selection · audit · history"]
+    OriginA["SwiftLM Origin A"]
+    OriginB["SwiftLM Origin B"]
     Mesh["Wonder Mesh Gateway"]
-    Node["Node 1162<br/>100.64.0.79:30844"]
-    Relay["socat relay<br/>service port 8080"]
-    MLXGateway["Mac MLX Gateway<br/>192.168.5.2:18124<br/>queue · metrics · request ID"]
-    SwiftLM["Mac SwiftLM<br/>127.0.0.1:18123"]
+    NodeA["Wonder Mesh Node A"]
+    NodeB["Wonder Mesh Node B"]
+    RelayA["socat relay A"]
+    RelayB["socat relay B"]
+    MLXGatewayA["Mac A MLX Gateway<br/>queue · metrics · request ID"]
+    SwiftLMA["Mac A SwiftLM"]
+    MLXGatewayB["Mac B MLX Gateway"]
+    SwiftLMB["Mac B SwiftLM"]
     Data[("Zeabur volume<br/>/data")]
 
     Client -->|"Bearer sk-mlx-…"| Public
     Public --> Dashboard
-    Dashboard -->|"Bearer upstream master key"| Origin
+    Dashboard -->|"Key node_id → shared master key"| OriginA
+    Dashboard -->|"Key node_id → shared master key"| OriginB
     Dashboard --> Data
-    Origin --> Mesh
-    Mesh --> Node
-    Node --> Relay
-    Relay --> MLXGateway --> SwiftLM
+    OriginA --> Mesh --> NodeA --> RelayA --> MLXGatewayA --> SwiftLMA
+    OriginB --> Mesh --> NodeB --> RelayB --> MLXGatewayB --> SwiftLMB
 ```
 
 Client domain 與 origin domain 必須不同。若 Dashboard 的 `UPSTREAM_BASE_URL` 指回自己的 client domain，請求會形成無限代理迴圈。
@@ -66,7 +70,7 @@ Client domain 與 origin domain 必須不同。若 Dashboard 的 `UPSTREAM_BASE_
 | TCP relay | 將 mesh port 轉送到本機 IP/port | 驗證、修改 request body |
 | Wonder Mesh | 建立雲端與本機之間的私人網路 | 執行模型或保存聊天 |
 | Wonder Mesh Gateway | 將公開 hostname 對應到 node/mesh port | 取代應用層驗證 |
-| Dashboard Gateway | 客戶 key、代理、稽核與聊天紀錄 | 執行模型權重 |
+| Dashboard Gateway | 客戶 key、節點選擇、代理、稽核與聊天紀錄 | 執行模型權重或洩漏 master key |
 | Zeabur volume | 保存 API key digest、聊天與 request records | 保存明文 client key |
 
 ## 3. 部署前確認
@@ -254,6 +258,19 @@ https://richard-swiftlm.zeabur.app/v1
 ```
 
 客戶使用 Dashboard 發行的完整 `sk-mlx-...` key。完整 key 只顯示一次，資料庫只保存 HMAC digest 與 prefix。
+
+### 8.3 多機器、明確選擇的模型服務
+
+Dashboard 可以登記多個 SwiftLM machine nodes。每個節點都有自己的：
+
+- 機器名稱。
+- Wonder Mesh Origin `/v1` URL。
+- 活躍模型 ID 與顯示名稱。
+- 在線狀態（Dashboard 每 5 秒以 authenticated `/models` 檢查）。
+
+Dashboard API Key 綁定 `node_id`，客戶仍然只呼叫同一個 Client API domain；Dashboard 依 Key 導向該節點。這不是自動負載平衡：同一個 Key 與聊天對話都有明確的機器目標。
+
+聊天頁可在第一則訊息前選擇機器與模型。訊息送出後，對話固定在該節點，避免 KV cache、模型版本或上下文跨機器混用。SwiftLM Master Key 仍只保存在 Mac Keychain 與 Dashboard secret variables，不會發給客戶。
 
 ## 9. 逐跳驗證
 
