@@ -366,7 +366,9 @@ app.all("/v1/chat/completions", requireApiKey, (req, res) => {
   proxyOpenAI({ config, req, res, apiKey: req.dashboardApiKey, store });
 });
 
-app.use(express.static(publicDir, { maxAge: "1h", etag: true }));
+// The dashboard is a single-page app. Revalidate assets on every reload so a
+// deployed UI fix is never hidden behind an hour of browser cache.
+app.use(express.static(publicDir, { maxAge: 0, etag: true }));
 app.get("/{*splat}", (_req, res) => res.sendFile(path.join(publicDir, "index.html")));
 
 const server = app.listen(config.port, "0.0.0.0", () => {
