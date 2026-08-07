@@ -93,6 +93,29 @@ test("keys, conversations, and request records stay bound to their selected node
   assert.equal(store.listRequests()[0].node_name, "Mac Studio");
   assert.equal(store.listRequests()[0].throughput_tps, 12.5);
   assert.equal(store.listRequests()[0].ttft_ms, 30);
+  assert.equal(store.getNodeUsage(node.id).api_key_count, 1);
+  assert.equal(store.deleteNode(node.id), false);
+  store.close();
+});
+
+test("an unused non-default node can be deleted", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "swiftlm-dashboard-node-delete-test-"));
+  const database = path.join(directory, "test.sqlite");
+  const store = createStore(database, { defaultNode, nodeSecret });
+  const node = store.createNode({
+    id: "unused-node",
+    name: "Unused Node",
+    originBaseUrl: "https://unused.example/v1",
+    modelId: "unused-model",
+    modelName: "Unused Model",
+    upstreamApiKey: "unused-node-api-key",
+  });
+  const usage = store.getNodeUsage(node.id);
+  assert.equal(usage.api_key_count, 0);
+  assert.equal(usage.conversation_count, 0);
+  assert.equal(usage.request_count, 0);
+  assert.equal(store.deleteNode(node.id), true);
+  assert.equal(store.getNode(node.id), null);
   store.close();
 });
 

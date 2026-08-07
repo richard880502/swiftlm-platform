@@ -127,7 +127,12 @@ async function checkNode(node) {
 }
 
 async function nodeWithStatus(node) {
-  return { ...node, status: await checkNode(node) };
+  return {
+    ...node,
+    is_default: node.id === config.defaultNode.id,
+    usage: store.getNodeUsage(node.id),
+    status: await checkNode(node),
+  };
 }
 
 function resolveEnabledNode(nodeId) {
@@ -213,6 +218,25 @@ app.post("/api/nodes/:id/enabled", requireAdmin, (req, res) => {
   }
   store.setNodeEnabled(id, enabled);
   return res.json(store.getNode(id));
+});
+
+app.delete("/api/nodes/:id", requireAdmin, (req, res) => {
+  const id = safeNodeId(req.params.id);
+  if (id === config.defaultNode.id) {
+    return res.status(400).json({ error: { message: "預設機器不可刪除" } });
+  }
+  const node = store.getNode(id);
+  if (!node) return res.status(404).json({ error: { message: "Node not found" } });
+  const usage = store.getNodeUsage(id);
+  if (usage.api_key_count || usage.conversation_count || usage.request_count) {
+    return res.status(409).json({
+      error: {
+        message: `此機器仍有 ${usage.api_key_count} 把 API Key、${usage.conversation_count} 個對話與 ${usage.request_count} 筆使用紀錄；請先清理這些資料後再刪除。`,
+      },
+    });
+  }
+  store.deleteNode(id);
+  return res.json({ ok: true });
 });
 
 app.get("/api/keys", requireAdmin, (_req, res) => res.json({ data: store.listApiKeys() }));

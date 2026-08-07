@@ -162,6 +162,13 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
       FROM nodes WHERE id = ?
     `),
     setNodeEnabled: db.prepare("UPDATE nodes SET enabled = ?, updated_at = ? WHERE id = ?"),
+    nodeUsage: db.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM api_keys WHERE node_id = ?) AS api_key_count,
+        (SELECT COUNT(*) FROM conversations WHERE node_id = ?) AS conversation_count,
+        (SELECT COUNT(*) FROM api_requests WHERE node_id = ?) AS request_count
+    `),
+    deleteNode: db.prepare("DELETE FROM nodes WHERE id = ?"),
     insertKey: db.prepare(`
       INSERT INTO api_keys(id, name, prefix, digest, node_id, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -248,6 +255,14 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
     },
     setNodeEnabled(id, enabled) {
       return statements.setNodeEnabled.run(enabled ? 1 : 0, now(), id).changes > 0;
+    },
+    getNodeUsage(id) {
+      return statements.nodeUsage.get(id, id, id);
+    },
+    deleteNode(id) {
+      const usage = statements.nodeUsage.get(id, id, id);
+      if (usage.api_key_count || usage.conversation_count || usage.request_count) return false;
+      return statements.deleteNode.run(id).changes > 0;
     },
     createApiKey({ id, name, prefix, digest, nodeId }) {
       statements.insertKey.run(id, name, prefix, digest, nodeId, now());

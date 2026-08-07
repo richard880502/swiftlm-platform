@@ -59,6 +59,8 @@ https://richard-swiftlm-origin-7165.zeabur.app/v1
 
 新增節點時需要填入該服務的 `/v1` Origin URL 和**該節點自己的上游 API Key**。Dashboard 只在伺服器端使用這把金鑰，並以伺服器祕密加密後保存；節點列表、瀏覽器與 Dashboard 發給客戶的 API key 都不會取得它。這讓每台機器可以獨立輪替或撤銷上游金鑰。
 
+預設機器不能刪除。其他機器可在沒有綁定 API Key、對話或使用紀錄時刪除；這個限制避免舊的權限或歷史紀錄失去原本的機器歸屬。
+
 Dashboard API Key 是節點綁定的 client credential，不是 SwiftLM Master Key。客戶仍呼叫同一個公開 endpoint：
 
 ```text

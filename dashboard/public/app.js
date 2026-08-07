@@ -585,6 +585,7 @@ function renderNodes() {
     const stateName = node.status?.state === "online" ? "在線"
       : node.status?.state === "disabled" ? "已停用" : "離線";
     const latency = node.status?.latency_ms == null ? "—" : `${formatNumber(node.status.latency_ms)} ms`;
+    const canDelete = !node.is_default;
     return `
       <article class="node-row ${node.enabled ? "" : "disabled"}">
         <span class="node-indicator ${escapeHtml(node.status?.state || "offline")}" aria-hidden="true"></span>
@@ -593,9 +594,12 @@ function renderNodes() {
           <p>${escapeHtml(node.model_name)} · ${escapeHtml(node.model_id)}</p>
           <small>最後檢查 ${formatDate(node.status?.checked_at)} · ${latency}</small>
         </div>
-        <button class="${node.enabled ? "danger-button" : "toolbar-button"}" data-toggle-node="${escapeHtml(node.id)}" data-node-enabled="${node.enabled ? "0" : "1"}">
-          ${node.enabled ? "停用" : "啟用"}
-        </button>
+        <div class="node-actions">
+          <button class="${node.enabled ? "danger-button" : "toolbar-button"}" data-toggle-node="${escapeHtml(node.id)}" data-node-enabled="${node.enabled ? "0" : "1"}">
+            ${node.enabled ? "停用" : "啟用"}
+          </button>
+          ${canDelete ? `<button class="danger-button subtle-danger" data-delete-node="${escapeHtml(node.id)}">刪除</button>` : ""}
+        </div>
       </article>
     `;
   }).join("") : '<div class="empty-list"><strong>尚未加入機器</strong><span>加入已透過 Wonder Mesh 發布的 SwiftLM Origin。</span></div>';
@@ -609,6 +613,18 @@ function renderNodes() {
         });
         await loadNodes();
         showToast(enabled ? "機器已啟用" : "機器已停用");
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+  elements.nodeList.querySelectorAll("[data-delete-node]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("確定刪除這台機器？已建立 API Key、對話或使用紀錄的機器不可刪除。")) return;
+      try {
+        await request(`/api/nodes/${button.dataset.deleteNode}`, { method: "DELETE" });
+        await loadNodes();
+        showToast("機器已刪除");
       } catch (error) {
         showToast(error.message);
       }
