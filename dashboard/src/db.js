@@ -1,6 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  randomBytes,
+  randomUUID,
+} from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
 function now() {
@@ -12,7 +18,34 @@ function addColumnIfMissing(db, table, column, definition) {
   if (!columns.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
 }
 
-export function createStore(databasePath, { defaultNode } = {}) {
+function encryptionKey(secret) {
+  return secret ? createHash("sha256").update(secret).digest() : null;
+}
+
+function encryptNodeKey(value, key) {
+  if (!value) return null;
+  if (!key) throw new Error("A node secret key is required to store an upstream API key");
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  return `v1:${iv.toString("base64url")}:${cipher.getAuthTag().toString("base64url")}:${encrypted.toString("base64url")}`;
+}
+
+function decryptNodeKey(value, key) {
+  if (!value || !value.startsWith("v1:")) return value || null;
+  if (!key) return null;
+  try {
+    const [, version, ivText, tagText, encryptedText] = value.match(/^(v1):([^:]+):([^:]+):([^:]+)$/) || [];
+    if (version !== "v1") return null;
+    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(ivText, "base64url"));
+    decipher.setAuthTag(Buffer.from(tagText, "base64url"));
+    return Buffer.concat([decipher.update(Buffer.from(encryptedText, "base64url")), decipher.final()]).toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new DatabaseSync(databasePath);
   db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
@@ -68,6 +101,7 @@ export function createStore(databasePath, { defaultNode } = {}) {
   // Keep existing installations compatible: SQLite cannot add a non-null foreign key
   // to a populated table, so legacy records are backfilled below after the default node exists.
   addColumnIfMissing(db, "api_keys", "node_id", "node_id TEXT REFERENCES nodes(id) ON DELETE RESTRICT");
+  addColumnIfMissing(db, "nodes", "upstream_api_key", "upstream_api_key TEXT");
   addColumnIfMissing(db, "conversations", "node_id", "node_id TEXT REFERENCES nodes(id) ON DELETE RESTRICT");
   addColumnIfMissing(db, "conversations", "model_id", "model_id TEXT");
   addColumnIfMissing(db, "api_requests", "node_id", "node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL");
@@ -83,14 +117,16 @@ export function createStore(databasePath, { defaultNode } = {}) {
 
   if (!defaultNode?.id) throw new Error("A default SwiftLM node is required");
   const timestamp = now();
+  const nodeKey = encryptionKey(nodeSecret);
   db.prepare(`
-    INSERT INTO nodes(id, name, origin_base_url, model_id, model_name, enabled, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+    INSERT INTO nodes(id, name, origin_base_url, model_id, model_name, upstream_api_key, enabled, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       origin_base_url = excluded.origin_base_url,
       model_id = excluded.model_id,
       model_name = excluded.model_name,
+      upstream_api_key = COALESCE(nodes.upstream_api_key, excluded.upstream_api_key),
       updated_at = excluded.updated_at
   `).run(
     defaultNode.id,
@@ -98,6 +134,7 @@ export function createStore(databasePath, { defaultNode } = {}) {
     defaultNode.originBaseUrl,
     defaultNode.modelId,
     defaultNode.modelName,
+    encryptNodeKey(defaultNode.upstreamApiKey, nodeKey),
     timestamp,
     timestamp,
   );
@@ -109,8 +146,8 @@ export function createStore(databasePath, { defaultNode } = {}) {
 
   const statements = {
     insertNode: db.prepare(`
-      INSERT INTO nodes(id, name, origin_base_url, model_id, model_name, enabled, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+      INSERT INTO nodes(id, name, origin_base_url, model_id, model_name, upstream_api_key, enabled, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
     `),
     listNodes: db.prepare(`
       SELECT id, name, origin_base_url, model_id, model_name, enabled, created_at, updated_at
@@ -120,6 +157,10 @@ export function createStore(databasePath, { defaultNode } = {}) {
       SELECT id, name, origin_base_url, model_id, model_name, enabled, created_at, updated_at
       FROM nodes WHERE id = ?
     `),
+    getNodeForProxy: db.prepare(`
+      SELECT id, name, origin_base_url, model_id, model_name, upstream_api_key, enabled, created_at, updated_at
+      FROM nodes WHERE id = ?
+    `),
     setNodeEnabled: db.prepare("UPDATE nodes SET enabled = ?, updated_at = ? WHERE id = ?"),
     insertKey: db.prepare(`
       INSERT INTO api_keys(id, name, prefix, digest, node_id, created_at)
@@ -127,7 +168,8 @@ export function createStore(databasePath, { defaultNode } = {}) {
     `),
     getKeyByDigest: db.prepare(`
       SELECT k.id, k.name, k.prefix, k.node_id, k.created_at, k.last_used_at, k.revoked_at,
-             n.name AS node_name, n.origin_base_url, n.model_id, n.model_name, n.enabled AS node_enabled
+             n.name AS node_name, n.origin_base_url, n.model_id, n.model_name, n.upstream_api_key,
+             n.enabled AS node_enabled
       FROM api_keys k JOIN nodes n ON n.id = k.node_id WHERE k.digest = ?
     `),
     touchKey: db.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?"),
@@ -190,13 +232,20 @@ export function createStore(databasePath, { defaultNode } = {}) {
 
   return {
     close: () => db.close(),
-    createNode({ id = randomUUID(), name, originBaseUrl, modelId, modelName }) {
+    createNode({ id = randomUUID(), name, originBaseUrl, modelId, modelName, upstreamApiKey }) {
       const createdAt = now();
-      statements.insertNode.run(id, name, originBaseUrl, modelId, modelName, createdAt, createdAt);
+      statements.insertNode.run(
+        id, name, originBaseUrl, modelId, modelName,
+        encryptNodeKey(upstreamApiKey, nodeKey), createdAt, createdAt,
+      );
       return statements.getNode.get(id);
     },
     listNodes: () => statements.listNodes.all(),
     getNode: (id) => statements.getNode.get(id) || null,
+    getNodeForProxy(id) {
+      const node = statements.getNodeForProxy.get(id);
+      return node ? { ...node, upstream_api_key: decryptNodeKey(node.upstream_api_key, nodeKey) } : null;
+    },
     setNodeEnabled(id, enabled) {
       return statements.setNodeEnabled.run(enabled ? 1 : 0, now(), id).changes > 0;
     },
@@ -208,7 +257,7 @@ export function createStore(databasePath, { defaultNode } = {}) {
       const key = statements.getKeyByDigest.get(digest);
       if (!key || key.revoked_at || !key.node_enabled) return null;
       statements.touchKey.run(now(), key.id);
-      return key;
+      return { ...key, upstream_api_key: decryptNodeKey(key.upstream_api_key, nodeKey) };
     },
     listApiKeys: () => statements.listKeys.all(),
     revokeApiKey(id) {

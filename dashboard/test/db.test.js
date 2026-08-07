@@ -12,12 +12,15 @@ const defaultNode = {
   originBaseUrl: "https://mac-mini-origin.example/v1",
   modelId: "majentik/qwen-test",
   modelName: "Qwen Test",
+  upstreamApiKey: "default-node-api-key",
 };
+
+const nodeSecret = "test-key-hash-secret";
 
 test("keys, conversations and history persist across reopen", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "swiftlm-dashboard-test-"));
   const database = path.join(directory, "test.sqlite");
-  let store = createStore(database, { defaultNode });
+  let store = createStore(database, { defaultNode, nodeSecret });
 
   store.createApiKey({
     id: "key-1", name: "Test", prefix: "sk-mlx-test…", digest: "digest-1", nodeId: defaultNode.id,
@@ -35,7 +38,7 @@ test("keys, conversations and history persist across reopen", () => {
   );
   store.close();
 
-  store = createStore(database, { defaultNode });
+  store = createStore(database, { defaultNode, nodeSecret });
   assert.equal(store.listApiKeys().length, 1);
   assert.equal(store.getConversation(conversation.id).messages.length, 2);
   assert.equal(
@@ -50,7 +53,7 @@ test("keys, conversations and history persist across reopen", () => {
 test("deleting a conversation also removes its messages", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "swiftlm-dashboard-delete-test-"));
   const database = path.join(directory, "test.sqlite");
-  const store = createStore(database, { defaultNode });
+  const store = createStore(database, { defaultNode, nodeSecret });
   const conversation = store.createConversation({ title: "待刪除" });
 
   store.addMessage(conversation.id, "user", "這是一則測試訊息");
@@ -64,13 +67,14 @@ test("deleting a conversation also removes its messages", () => {
 test("keys, conversations, and request records stay bound to their selected node", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "swiftlm-dashboard-nodes-test-"));
   const database = path.join(directory, "test.sqlite");
-  const store = createStore(database, { defaultNode });
+  const store = createStore(database, { defaultNode, nodeSecret });
   const node = store.createNode({
     id: "mac-studio",
     name: "Mac Studio",
     originBaseUrl: "https://mac-studio-origin.example/v1",
     modelId: "majentik/qwen-studio",
     modelName: "Qwen Studio",
+    upstreamApiKey: "studio-node-api-key",
   });
   store.createApiKey({ id: "key-2", name: "Studio Key", prefix: "sk-mlx-studio…", digest: "digest-2", nodeId: node.id });
   const conversation = store.createConversation({ nodeId: node.id, modelId: node.model_id });
@@ -81,6 +85,9 @@ test("keys, conversations, and request records stay bound to their selected node
   });
 
   assert.equal(store.authenticateApiKey("digest-2").node_name, "Mac Studio");
+  assert.equal(store.authenticateApiKey("digest-2").upstream_api_key, "studio-node-api-key");
+  assert.equal(store.getNode(node.id).upstream_api_key, undefined);
+  assert.equal(store.getNodeForProxy(node.id).upstream_api_key, "studio-node-api-key");
   assert.equal(store.getConversation(conversation.id).node_name, "Mac Studio");
   assert.equal(store.listRequests()[0].node_id, node.id);
   assert.equal(store.listRequests()[0].node_name, "Mac Studio");
@@ -117,7 +124,7 @@ test("an existing single-node database is migrated to the default node", () => {
   `);
   legacy.close();
 
-  const store = createStore(database, { defaultNode });
+  const store = createStore(database, { defaultNode, nodeSecret });
   assert.equal(store.authenticateApiKey("legacy-digest").node_id, defaultNode.id);
   assert.equal(store.getConversation("legacy-conversation").node_id, defaultNode.id);
   assert.equal(store.listRequests()[0].node_id, defaultNode.id);

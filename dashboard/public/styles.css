@@ -441,9 +441,10 @@ input { padding: 12px 13px; }
 .node-title strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .node-main p, .node-main small { display: block; margin: 5px 0 0; overflow: hidden; color: var(--muted); font-size: 10px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
 .node-main small { color: #aeb0b7; }
-.node-create-form { display: grid; grid-template-columns: minmax(130px, .8fr) minmax(130px, .9fr) minmax(180px, 1.5fr) minmax(210px, 1.6fr) auto; gap: 9px; padding: 16px 17px; }
+.node-create-form { display: grid; grid-template-columns: repeat(3, minmax(170px, 1fr)); gap: 12px 9px; padding: 16px 17px; }
+.node-create-form label { display: grid; gap: 5px; min-width: 0; font-size: 10px; }
 .node-create-form input { min-width: 0; height: 37px; font-size: 11px; }
-.node-create-form .primary { height: 37px; padding: 7px 12px; white-space: nowrap; }
+.node-create-form .primary { align-self: end; height: 37px; padding: 7px 12px; white-space: nowrap; }
 
 .toast { position: fixed; z-index: 30; left: 50%; bottom: 27px; transform: translateX(-50%); padding: 9px 14px; color: white; font-size: 11px; font-weight: 600; border: 1px solid rgba(255,255,255,.2); border-radius: 999px; background: rgba(52,54,61,.9); box-shadow: 0 12px 35px rgba(0,0,0,.36), inset 0 1px rgba(255,255,255,.12); backdrop-filter: blur(20px); }
 
@@ -476,7 +477,6 @@ input { padding: 12px 13px; }
   .key-create-form { flex-wrap: wrap; }
   .key-create-form select { flex: 1; }
   .node-create-form { grid-template-columns: 1fr 1fr; }
-  .node-create-form input:nth-child(3), .node-create-form input:nth-child(4) { grid-column: 1 / -1; }
   .key-reveal { grid-template-columns: 1fr auto; }
   .key-reveal code { grid-column: 1 / -1; grid-row: 2; }
 }
@@ -498,7 +498,6 @@ input { padding: 12px 13px; }
   .settings-row { flex-wrap: wrap; }
   .settings-row label:has(select) select { max-width: 105px; }
   .node-create-form { grid-template-columns: 1fr; }
-  .node-create-form input:nth-child(3), .node-create-form input:nth-child(4) { grid-column: auto; }
   .message { gap: 9px; }
   .message-avatar { width: 28px; height: 28px; }
   .login-card { padding: 34px 25px; }

@@ -65,6 +65,7 @@ const elements = {
   nodeModelName: $("#nodeModelName"),
   nodeModelId: $("#nodeModelId"),
   nodeOrigin: $("#nodeOrigin"),
+  nodeUpstreamKey: $("#nodeUpstreamKey"),
   toast: $("#toast"),
 };
 
@@ -689,6 +690,7 @@ elements.createNodeForm.addEventListener("submit", async (event) => {
         model_name: elements.nodeModelName.value,
         model_id: elements.nodeModelId.value,
         origin_base_url: elements.nodeOrigin.value,
+        upstream_api_key: elements.nodeUpstreamKey.value,
       }),
     });
     elements.createNodeForm.reset();

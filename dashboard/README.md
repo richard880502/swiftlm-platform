@@ -55,7 +55,9 @@ https://richard-swiftlm-origin-7165.zeabur.app/v1
 
 第一台機器由 `UPSTREAM_BASE_URL`、`MODEL_ID` 與 `DEFAULT_NODE_*` 自動建立；舊有對話、Key 與 request history 會安全地遷移到這個預設節點。
 
-之後在 Dashboard 的「機器」加入其他 SwiftLM Origin。每台機器目前代表一個活躍的 SwiftLM 模型服務，因此會有一個模型 ID；若同一部實體 Mac 要同時提供不同模型，請將每個獨立 SwiftLM service 以不同 Origin 登記為不同節點。
+之後在 Dashboard 的「機器」加入其他 SwiftLM、vLLM 或任何 OpenAI 相容 Origin。每台機器目前代表一個活躍的模型服務，因此會有一個模型 ID；若同一部實體 Mac 要同時提供不同模型，請將每個獨立 service 以不同 Origin 登記為不同節點。
+
+新增節點時需要填入該服務的 `/v1` Origin URL 和**該節點自己的上游 API Key**。Dashboard 只在伺服器端使用這把金鑰，並以伺服器祕密加密後保存；節點列表、瀏覽器與 Dashboard 發給客戶的 API key 都不會取得它。這讓每台機器可以獨立輪替或撤銷上游金鑰。
 
 Dashboard API Key 是節點綁定的 client credential，不是 SwiftLM Master Key。客戶仍呼叫同一個公開 endpoint：
 

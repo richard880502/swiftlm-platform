@@ -37,6 +37,9 @@ export function loadConfig() {
       // Keep the historical node ID stable so existing keys and conversations keep routing correctly.
       name: process.env.DEFAULT_NODE_NAME?.trim() || "Richard Mac mini",
       originBaseUrl: required("UPSTREAM_BASE_URL").replace(/\/$/, ""),
+      // Kept server-side only. The database encrypts this value before it is persisted
+      // with the default node, so every node can authenticate to its own Origin.
+      upstreamApiKey: required("UPSTREAM_API_KEY"),
       modelId,
       modelName: process.env.MODEL_DISPLAY_NAME?.trim() || modelId,
     },

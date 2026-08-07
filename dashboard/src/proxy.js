@@ -9,11 +9,15 @@ function upstreamUrl(node, path) {
   return `${node.origin_base_url}${path}`;
 }
 
+function upstreamApiKey(config, node) {
+  return node.upstream_api_key || config.upstreamApiKey;
+}
+
 export async function upstreamJson(config, node, path, body, { signal } = {}) {
   const response = await fetch(upstreamUrl(node, path), {
     method: body === undefined ? "GET" : "POST",
     headers: {
-      Authorization: `Bearer ${config.upstreamApiKey}`,
+      Authorization: `Bearer ${upstreamApiKey(config, node)}`,
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -39,7 +43,7 @@ export async function streamDashboardChat({ config, node, requestBody, response,
   const upstream = await fetch(upstreamUrl(node, "/chat/completions"), {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${config.upstreamApiKey}`,
+      Authorization: `Bearer ${upstreamApiKey(config, node)}`,
       "Content-Type": "application/json",
       "X-MLX-Include-Metrics": "1",
     },
@@ -163,6 +167,7 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
     origin_base_url: apiKey.origin_base_url,
     model_id: apiKey.model_id,
     model_name: apiKey.model_name,
+    upstream_api_key: apiKey.upstream_api_key,
   };
 
   try {
@@ -197,7 +202,7 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
     const upstream = await fetch(upstreamUrl(node, route), {
       method: req.method,
       headers: {
-        Authorization: `Bearer ${config.upstreamApiKey}`,
+        Authorization: `Bearer ${upstreamApiKey(config, node)}`,
         "Content-Type": "application/json",
         Accept: req.headers.accept || "application/json",
         "X-MLX-Include-Metrics": body?.stream ? "1" : "0",

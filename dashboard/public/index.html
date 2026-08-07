@@ -193,12 +193,13 @@
             <div id="nodeList" class="node-list"></div>
           </div>
           <div class="content-card">
-            <div class="content-card-header"><div><h3>加入機器</h3><p>Origin URL 必須是該 SwiftLM 節點的私有 `/v1` 網址。</p></div></div>
+            <div class="content-card-header"><div><h3>加入機器</h3><p>填入該機器的 Zeabur Origin `/v1` 網址與它自己的 API Key。金鑰只會在 Dashboard 伺服器端加密保存。</p></div></div>
             <form id="createNodeForm" class="node-create-form">
-              <input id="nodeName" placeholder="機器名稱，例如 Mac Studio" maxlength="80" required />
-              <input id="nodeModelName" placeholder="顯示模型名稱" maxlength="120" required />
-              <input id="nodeModelId" placeholder="模型 ID，例如 majentik/Qwen3.6-35B…" maxlength="240" required />
-              <input id="nodeOrigin" type="url" placeholder="https://node-origin.zeabur.app/v1" required />
+              <label>機器名稱<input id="nodeName" placeholder="例如 Mac Studio" maxlength="80" required /></label>
+              <label>顯示模型名稱<input id="nodeModelName" placeholder="例如 Qwen 3.6 35B" maxlength="120" required /></label>
+              <label>模型 ID<input id="nodeModelId" placeholder="例如 majentik/Qwen3.6-35B…" maxlength="240" required /></label>
+              <label>Zeabur Origin URL<input id="nodeOrigin" type="url" placeholder="https://node-origin.zeabur.app/v1" required /></label>
+              <label>該機器的 API Key<input id="nodeUpstreamKey" type="password" placeholder="貼上該服務的 API Key" autocomplete="new-password" required /></label>
               <button class="primary" type="submit">加入機器</button>
             </form>
           </div>
@@ -207,6 +208,6 @@
     </main>
 
     <div id="toast" class="toast hidden" role="status"></div>
-    <script type="module" src="/app.js?v=7"></script>
+    <script type="module" src="/app.js?v=8"></script>
   </body>
 </html>

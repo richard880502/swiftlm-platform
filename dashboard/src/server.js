@@ -15,7 +15,11 @@ import { createStore } from "./db.js";
 import { preview, proxyOpenAI, streamDashboardChat, upstreamJson } from "./proxy.js";
 
 const config = loadConfig();
-const store = createStore(config.databasePath, { defaultNode: config.defaultNode });
+const store = createStore(config.databasePath, {
+  defaultNode: config.defaultNode,
+  // Reuse the existing server-only secret to encrypt per-node Origin API keys at rest.
+  nodeSecret: config.keyHashSecret,
+});
 const app = express();
 const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public");
 const loginAttempts = new Map();
@@ -99,7 +103,9 @@ async function checkNode(node) {
     return { state: "disabled", ok: false, latency_ms: null, checked_at: new Date().toISOString() };
   }
   try {
-    const upstream = await upstreamJson(config, node, "/models", undefined, {
+    const proxyNode = store.getNodeForProxy(node.id);
+    if (!proxyNode?.upstream_api_key) throw new Error("Node API key is unavailable");
+    const upstream = await upstreamJson(config, proxyNode, "/models", undefined, {
       signal: AbortSignal.timeout(5_000),
     });
     return {
@@ -127,6 +133,11 @@ async function nodeWithStatus(node) {
 function resolveEnabledNode(nodeId) {
   const node = store.getNode(nodeId);
   return node?.enabled ? node : null;
+}
+
+function resolveEnabledProxyNode(nodeId) {
+  const node = store.getNodeForProxy(nodeId);
+  return node?.enabled && node.upstream_api_key ? node : null;
 }
 
 app.get("/health", (_req, res) => {
@@ -180,11 +191,12 @@ app.post("/api/nodes", requireAdmin, (req, res) => {
   const modelId = String(req.body?.model_id || "").trim().slice(0, 240);
   const modelName = String(req.body?.model_name || modelId).trim().slice(0, 120);
   const originBaseUrl = normalizedOrigin(req.body?.origin_base_url);
-  if (!name || !modelId || !modelName || !originBaseUrl) {
-    return res.status(400).json({ error: { message: "請填入機器名稱、模型與以 /v1 結尾的 Origin URL" } });
+  const upstreamApiKey = String(req.body?.upstream_api_key || "").trim();
+  if (!name || !modelId || !modelName || !originBaseUrl || !upstreamApiKey) {
+    return res.status(400).json({ error: { message: "請填入機器名稱、模型、以 /v1 結尾的 Origin URL 與該機器的 API Key" } });
   }
   try {
-    const node = store.createNode({ name, modelId, modelName, originBaseUrl });
+    const node = store.createNode({ name, modelId, modelName, originBaseUrl, upstreamApiKey });
     return res.status(201).json(node);
   } catch (error) {
     return res.status(409).json({ error: { message: error.message.includes("UNIQUE") ? "這個 Origin URL 已存在" : "無法建立節點" } });
@@ -297,7 +309,8 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
   if (!content) return res.status(400).json({ error: { message: "Message is required" } });
   if (content.length > 200_000) return res.status(413).json({ error: { message: "Message too large" } });
   const node = resolveEnabledNode(conversation.node_id);
-  if (!node || conversation.model_id !== node.model_id) {
+  const proxyNode = resolveEnabledProxyNode(conversation.node_id);
+  if (!node || !proxyNode || conversation.model_id !== node.model_id) {
     return res.status(503).json({ error: { message: "這台機器或模型目前無法使用" } });
   }
 
@@ -324,7 +337,7 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
 
     await streamDashboardChat({
       config,
-      node,
+      node: proxyNode,
       requestBody,
       response: res,
       onProgress: ({ assistant }) => {
