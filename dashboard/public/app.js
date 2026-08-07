@@ -501,7 +501,7 @@ async function renderActivity() {
     elements.activityList.innerHTML = entries.length ? entries.map((entry) => {
       const tokens = entry.prompt_tokens == null
         ? "未回報 Token"
-        : `${formatNumber(entry.prompt_tokens)} + ${formatNumber(entry.completion_tokens)} tokens`;
+        : `輸入 ${formatNumber(entry.prompt_tokens)} · 輸出 ${formatNumber(entry.completion_tokens)} tokens`;
       const throughput = entry.throughput_tps == null
         ? "tok/s 未回報"
         : `${formatNumber(entry.throughput_tps)} tok/s`;
