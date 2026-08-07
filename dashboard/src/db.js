@@ -71,6 +71,9 @@ export function createStore(databasePath, { defaultNode } = {}) {
   addColumnIfMissing(db, "conversations", "node_id", "node_id TEXT REFERENCES nodes(id) ON DELETE RESTRICT");
   addColumnIfMissing(db, "conversations", "model_id", "model_id TEXT");
   addColumnIfMissing(db, "api_requests", "node_id", "node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL");
+  addColumnIfMissing(db, "api_requests", "queue_ms", "queue_ms INTEGER");
+  addColumnIfMissing(db, "api_requests", "ttft_ms", "ttft_ms INTEGER");
+  addColumnIfMissing(db, "api_requests", "throughput_tps", "throughput_tps REAL");
   db.exec(`
     CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages(conversation_id, created_at);
     CREATE INDEX IF NOT EXISTS api_requests_created_idx ON api_requests(created_at DESC);
@@ -169,12 +172,14 @@ export function createStore(databasePath, { defaultNode } = {}) {
     insertRequest: db.prepare(`
       INSERT INTO api_requests(
         id, api_key_id, node_id, route, model, status, latency_ms,
-        prompt_tokens, completion_tokens, request_preview, response_preview, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        prompt_tokens, completion_tokens, queue_ms, ttft_ms, throughput_tps,
+        request_preview, response_preview, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `),
     listRequests: db.prepare(`
       SELECT r.id, r.route, r.model, r.node_id, r.status, r.latency_ms,
-             r.prompt_tokens, r.completion_tokens, r.request_preview, r.response_preview, r.created_at,
+             r.prompt_tokens, r.completion_tokens, r.queue_ms, r.ttft_ms, r.throughput_tps,
+             r.request_preview, r.response_preview, r.created_at,
              k.name AS api_key_name, k.prefix AS api_key_prefix, n.name AS node_name, n.model_name
       FROM api_requests r
       LEFT JOIN api_keys k ON k.id = r.api_key_id
@@ -251,6 +256,7 @@ export function createStore(databasePath, { defaultNode } = {}) {
       statements.insertRequest.run(
         randomUUID(), entry.apiKeyId || null, entry.nodeId || null, entry.route, entry.model || null,
         entry.status, entry.latencyMs, entry.promptTokens ?? null, entry.completionTokens ?? null,
+        entry.queueMs ?? null, entry.ttftMs ?? null, entry.throughputTps ?? null,
         entry.requestPreview || null, entry.responsePreview || null, now(),
       );
     },

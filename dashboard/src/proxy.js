@@ -41,8 +41,14 @@ export async function streamDashboardChat({ config, node, requestBody, response,
     headers: {
       Authorization: `Bearer ${config.upstreamApiKey}`,
       "Content-Type": "application/json",
+      "X-MLX-Include-Metrics": "1",
     },
-    body: JSON.stringify({ ...requestBody, stream: true }),
+    body: JSON.stringify({
+      ...requestBody,
+      stream: true,
+      // SwiftLM only sends usage in its final SSE chunk when explicitly requested.
+      stream_options: { ...requestBody.stream_options, include_usage: true },
+    }),
   });
 
   if (!upstream.ok || !upstream.body) {
@@ -68,6 +74,7 @@ export async function streamDashboardChat({ config, node, requestBody, response,
   let buffer = "";
   let assistant = "";
   let usage = null;
+  let metrics = null;
   let lastPersistedAssistant = "";
 
   const canWrite = () => clientConnected && !response.writableEnded && !response.destroyed;
@@ -77,7 +84,7 @@ export async function streamDashboardChat({ config, node, requestBody, response,
   const persistCompletion = async (completed) => {
     if (completionAttempted || !assistant.trim()) return null;
     completionAttempted = true;
-    return onComplete({ assistant, usage, completed });
+    return onComplete({ assistant, usage, metrics, completed });
   };
   const persistProgress = async () => {
     if (!onProgress || assistant === lastPersistedAssistant) return;
@@ -85,6 +92,11 @@ export async function streamDashboardChat({ config, node, requestBody, response,
     await onProgress({ assistant, usage });
   };
   const consumeEvent = async (eventText) => {
+    const eventName = eventText
+      .split("\n")
+      .find((line) => line.startsWith("event:"))
+      ?.slice(6)
+      .trim();
     const data = eventText
       .split("\n")
       .filter((line) => line.startsWith("data:"))
@@ -93,6 +105,10 @@ export async function streamDashboardChat({ config, node, requestBody, response,
     if (!data || data === "[DONE]") return;
     try {
       const chunk = JSON.parse(data);
+      if (eventName === "mlx-metrics") {
+        metrics = chunk;
+        return;
+      }
       assistant += chunk.choices?.[0]?.delta?.content || "";
       usage = chunk.usage || usage;
       emitData(JSON.stringify(chunk));
@@ -140,6 +156,7 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
   let status = 502;
   let responsePreview = "";
   let usage = null;
+  let metrics = null;
   const node = {
     id: apiKey.node_id,
     name: apiKey.node_name,
@@ -183,8 +200,15 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
         Authorization: `Bearer ${config.upstreamApiKey}`,
         "Content-Type": "application/json",
         Accept: req.headers.accept || "application/json",
+        "X-MLX-Include-Metrics": body?.stream ? "1" : "0",
       },
-      body: JSON.stringify(route === "/chat/completions" ? { ...body, model: node.model_id } : body),
+      body: JSON.stringify(route === "/chat/completions" && body?.stream
+        ? {
+          ...body,
+          model: node.model_id,
+          stream_options: { ...body.stream_options, include_usage: true },
+        }
+        : route === "/chat/completions" ? { ...body, model: node.model_id } : body),
     });
     status = upstream.status;
     res.status(status);
@@ -194,12 +218,31 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
       res.setHeader("Cache-Control", "no-cache, no-transform");
       const reader = upstream.body.getReader();
       const decoder = new TextDecoder();
+      let buffer = "";
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        responsePreview = preview(responsePreview + chunk);
-        res.write(chunk);
+        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+        let boundary;
+        while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+          const eventText = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const eventName = eventText.split("\n")
+            .find((line) => line.startsWith("event:"))?.slice(6).trim();
+          const data = eventText.split("\n").filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trimStart()).join("\n");
+          if (eventName === "mlx-metrics") {
+            try { metrics = JSON.parse(data); } catch { /* keep transparent streaming on malformed metrics */ }
+            continue;
+          }
+          responsePreview = preview(responsePreview + eventText);
+          res.write(`${eventText}\n\n`);
+        }
+      }
+      buffer += decoder.decode();
+      if (buffer) {
+        responsePreview = preview(responsePreview + buffer);
+        res.write(buffer);
       }
       res.end();
       return;
@@ -235,8 +278,11 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
       model: node.model_id,
       status,
       latencyMs: Date.now() - started,
-      promptTokens: usage?.prompt_tokens,
-      completionTokens: usage?.completion_tokens,
+      promptTokens: metrics?.prompt_tokens ?? usage?.prompt_tokens,
+      completionTokens: metrics?.completion_tokens ?? usage?.completion_tokens,
+      queueMs: metrics?.queue_ms,
+      ttftMs: metrics?.ttft_ms,
+      throughputTps: metrics?.throughput_tps,
       requestPreview: preview(body ?? {}),
       responsePreview,
     });

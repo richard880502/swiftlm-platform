@@ -134,7 +134,7 @@ function collectBody(request) {
 }
 
 function finishJob(job, event, extra = {}) {
-  if (job.finished) return;
+  if (job.finished) return null;
   job.finished = true;
   running.delete(job.id);
   const finishedAt = Date.now();
@@ -167,6 +167,7 @@ function finishJob(job, event, extra = {}) {
   logEvent(record);
   addRecent({ timestamp: iso(finishedAt), ...record });
   drainQueue();
+  return record;
 }
 
 function parseSse(job, chunk) {
@@ -260,8 +261,14 @@ function startUpstream(job) {
     });
     upstreamResponse.on("end", () => {
       if (!job.isSse) parseJsonMetrics(job);
+      const record = finishJob(job, job.statusCode >= 200 && job.statusCode < 400 ? "completed" : "failed");
+      // Dashboard opts into this final SSE event so it can save exact Gateway
+      // metrics without exposing the local monitoring endpoint through Wonder Mesh.
+      if (record && job.isSse && job.headers["x-mlx-include-metrics"] === "1"
+        && !job.response.destroyed && !job.response.writableEnded) {
+        job.response.write(`event: mlx-metrics\ndata: ${JSON.stringify(record)}\n\n`);
+      }
       if (!job.response.destroyed && !job.response.writableEnded) job.response.end();
-      finishJob(job, job.statusCode >= 200 && job.statusCode < 400 ? "completed" : "failed");
     });
     upstreamResponse.on("error", (error) => finishJob(job, "failed", { error: error.message }));
   });

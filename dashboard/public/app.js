@@ -502,6 +502,13 @@ async function renderActivity() {
       const tokens = entry.prompt_tokens == null
         ? "未回報 Token"
         : `${formatNumber(entry.prompt_tokens)} + ${formatNumber(entry.completion_tokens)} tokens`;
+      const throughput = entry.throughput_tps == null
+        ? "tok/s 未回報"
+        : `${formatNumber(entry.throughput_tps)} tok/s`;
+      const timing = [
+        entry.queue_ms == null ? null : `排隊 ${formatNumber(entry.queue_ms)} ms`,
+        entry.ttft_ms == null ? null : `首 Token ${formatNumber(entry.ttft_ms)} ms`,
+      ].filter(Boolean).join(" · ");
       const success = entry.status >= 200 && entry.status < 300;
       return `
         <article class="activity-row">
@@ -509,6 +516,7 @@ async function renderActivity() {
           <div class="activity-main">
             <div class="activity-title"><strong>${escapeHtml(entry.route)}</strong><span>${formatDate(entry.created_at)}</span></div>
             <p>${escapeHtml(entry.node_name || "未指定機器")} · ${escapeHtml(entry.model_name || entry.model || "模型")} · ${escapeHtml(entry.api_key_name || "Dashboard")} · ${tokens}</p>
+            <p class="activity-performance">${throughput}${timing ? ` · ${escapeHtml(timing)}` : ""}</p>
             ${entry.response_preview ? `<p class="response-preview">${escapeHtml(entry.response_preview.slice(0, 180))}</p>` : ""}
           </div>
           <div class="activity-metrics"><strong>${entry.status}</strong><span>${formatNumber(entry.latency_ms)} ms</span></div>

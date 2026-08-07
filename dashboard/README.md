@@ -9,7 +9,7 @@ Dashboard 是平台的公開 API gateway 與管理介面，部署在 Zeabur Tenc
 - OpenAI-compatible `/v1/models` 與 `/v1/chat/completions`。
 - 多輪網頁聊天；在第一則訊息前選擇機器與模型。
 - 模型機器頁面：每 5 秒確認每個 SwiftLM Origin 的模型在線狀態。
-- API request、token、延遲、機器、模型與內容 preview 紀錄。
+- API request、token、token/s、TTFT、排隊時間、延遲、機器、模型與內容 preview 紀錄。
 - SQLite 持久化，Zeabur volume 掛載於 `/data`。
 
 ## 本機開發

@@ -330,7 +330,7 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
       onProgress: ({ assistant }) => {
         store.updateMessageContent(assistantMessage.id, conversation.id, assistant);
       },
-      onComplete: ({ assistant, usage, completed = true }) => {
+      onComplete: ({ assistant, usage, metrics, completed = true }) => {
         store.updateMessageContent(assistantMessage.id, conversation.id, assistant);
         const message = { ...assistantMessage, content: assistant };
         store.recordRequest({
@@ -339,8 +339,11 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
           model: node.model_id,
           status: completed ? 200 : 502,
           latencyMs: Date.now() - started,
-          promptTokens: usage?.prompt_tokens,
-          completionTokens: usage?.completion_tokens,
+          promptTokens: metrics?.prompt_tokens ?? usage?.prompt_tokens,
+          completionTokens: metrics?.completion_tokens ?? usage?.completion_tokens,
+          queueMs: metrics?.queue_ms,
+          ttftMs: metrics?.ttft_ms,
+          throughputTps: metrics?.throughput_tps,
           requestPreview: preview({ content, settings: req.body }),
           responsePreview: preview(assistant),
         });

@@ -78,7 +78,7 @@ test("gateway queues inference requests and reports isolated metrics", async (t)
   await waitFor(`${base}/__mlx/health`, ({ ok }) => ok === true);
   const calls = Array.from({ length: 3 }, () => fetch(`${base}/v1/chat/completions`, {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: "Bearer test" },
+    headers: { "content-type": "application/json", authorization: "Bearer test", "x-mlx-include-metrics": "1" },
     body: JSON.stringify({ stream: true, messages: [{ role: "user", content: "secret" }] }),
   }));
 
@@ -89,7 +89,7 @@ test("gateway queues inference requests and reports isolated metrics", async (t)
   assert.equal(queued.active.filter(({ state }) => state === "waiting").length, 1);
 
   const responses = await Promise.all(calls);
-  await Promise.all(responses.map((response) => response.text()));
+  const streamed = await Promise.all(responses.map((response) => response.text()));
   assert.equal(maxConcurrent, 2);
   assert.equal(new Set(responses.map((response) => response.headers.get("x-mlx-request-id"))).size, 3);
 
@@ -100,6 +100,7 @@ test("gateway queues inference requests and reports isolated metrics", async (t)
   assert.equal(completed.summary.waiting, 0);
   assert.deepEqual(completed.recent.map(({ completion_tokens }) => completion_tokens), [1, 1, 1]);
   assert.ok(completed.recent.every(({ stream_chunks_per_second }) => stream_chunks_per_second > 0));
+  assert.ok(streamed.every((body) => body.includes("event: mlx-metrics")));
 
   const log = fs.readFileSync(path.join(temporary, "requests.jsonl"), "utf8");
   assert.doesNotMatch(log, /secret/);

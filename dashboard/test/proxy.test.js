@@ -42,7 +42,7 @@ test("dashboard generation is fully persisted after the browser disconnects", as
     response.write('data: {"choices":[{"delta":{"content":"保"}}]}\n\n');
     setTimeout(() => {
       response.write('data: {"choices":[{"delta":{"content":"存"}}]}\n\n');
-      response.end("data: [DONE]\n\n");
+      response.end('event: mlx-metrics\ndata: {"prompt_tokens":4,"completion_tokens":2,"queue_ms":3,"ttft_ms":20,"throughput_tps":12.5}\n\ndata: [DONE]\n\n');
     }, 15);
   });
   await new Promise((resolve) => upstream.listen(0, "127.0.0.1", resolve));
@@ -71,4 +71,5 @@ test("dashboard generation is fully persisted after the browser disconnects", as
   assert.deepEqual(progress, ["保", "保存"]);
   assert.equal(persisted.assistant, "保存");
   assert.equal(persisted.completed, true);
+  assert.equal(persisted.metrics.throughput_tps, 12.5);
 });

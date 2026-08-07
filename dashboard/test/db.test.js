@@ -74,12 +74,18 @@ test("keys, conversations, and request records stay bound to their selected node
   });
   store.createApiKey({ id: "key-2", name: "Studio Key", prefix: "sk-mlx-studio…", digest: "digest-2", nodeId: node.id });
   const conversation = store.createConversation({ nodeId: node.id, modelId: node.model_id });
-  store.recordRequest({ apiKeyId: "key-2", nodeId: node.id, route: "/v1/chat/completions", model: node.model_id, status: 200, latencyMs: 123 });
+  store.recordRequest({
+    apiKeyId: "key-2", nodeId: node.id, route: "/v1/chat/completions", model: node.model_id,
+    status: 200, latencyMs: 123, promptTokens: 10, completionTokens: 4,
+    queueMs: 2, ttftMs: 30, throughputTps: 12.5,
+  });
 
   assert.equal(store.authenticateApiKey("digest-2").node_name, "Mac Studio");
   assert.equal(store.getConversation(conversation.id).node_name, "Mac Studio");
   assert.equal(store.listRequests()[0].node_id, node.id);
   assert.equal(store.listRequests()[0].node_name, "Mac Studio");
+  assert.equal(store.listRequests()[0].throughput_tps, 12.5);
+  assert.equal(store.listRequests()[0].ttft_ms, 30);
   store.close();
 });
 

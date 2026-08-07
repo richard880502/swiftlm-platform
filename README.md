@@ -61,7 +61,7 @@ Client API 使用 Dashboard 產生的 `sk-mlx-...` key。Origin 只供 Dashboard
 ./mlx logs requests
 ```
 
-顯示經過 MLX Gateway 的 running、waiting、queue time、TTFT、tokens 與 throughput。每個請求都有獨立 request ID，不保存提示詞或完整回答。
+顯示經過 MLX Gateway 的 running、waiting、queue time、TTFT、tokens 與 throughput。Dashboard 對話與串流 API 會在完成時保存相同的 token/s、TTFT 與排隊時間。每個請求都有獨立 request ID，不保存提示詞或完整回答。
 
 模型保存在 `.cache/huggingface/`，目前使用的下載工具環境是 `.venv/`。
 
