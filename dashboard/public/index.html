@@ -190,7 +190,7 @@
               <div><h3>模型機器</h3><p>每台機器都有自己的 Wonder Mesh Origin 與可用模型。</p></div>
               <button id="refreshNodesButton" class="toolbar-button">重新整理狀態</button>
             </div>
-            <div id="nodeList" class="node-list"></div>
+            <div id="nodeList" class="node-list" tabindex="0" aria-label="模型機器清單"></div>
           </div>
           <div class="content-card">
             <div class="content-card-header"><div><h3>加入機器</h3><p>填入該機器的 Zeabur Origin `/v1` 網址與它自己的 API Key。金鑰只會在 Dashboard 伺服器端加密保存。</p></div></div>
@@ -208,6 +208,6 @@
     </main>
 
     <div id="toast" class="toast hidden" role="status"></div>
-    <script type="module" src="/app.js?v=8"></script>
+    <script type="module" src="/app.js?v=9"></script>
   </body>
 </html>

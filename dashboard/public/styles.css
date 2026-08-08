@@ -428,7 +428,14 @@ input { padding: 12px 13px; }
 .danger-button:hover { background: rgba(255,69,58,.11); }
 
 /* Nodes */
-.node-list { min-height: 150px; }
+.node-list {
+  min-height: 150px;
+  max-height: min(52vh, 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.node-list:focus-visible { outline: 2px solid rgba(10,132,255,.72); outline-offset: -2px; }
 .node-row { display: flex; align-items: flex-start; gap: 13px; padding: 15px 17px; border-bottom: 1px solid var(--line-soft); }
 .node-row:last-child { border-bottom: 0; }
 .node-row:hover { background: rgba(255,255,255,.025); }
@@ -438,10 +445,10 @@ input { padding: 12px 13px; }
 .node-indicator.disabled { background: var(--muted); box-shadow: none; }
 .node-main { flex: 1; min-width: 0; }
 .node-title { display: flex; align-items: center; gap: 9px; }
-.node-title strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.node-main p, .node-main small { display: block; margin: 5px 0 0; overflow: hidden; color: var(--muted); font-size: 10px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.node-title strong { min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+.node-main p, .node-main small { display: block; margin: 5px 0 0; color: var(--muted); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
 .node-main small { color: #aeb0b7; }
-.node-actions { display: flex; gap: 7px; align-items: center; }
+.node-actions { display: flex; flex: 0 0 auto; gap: 7px; align-items: center; }
 .subtle-danger { background: rgba(255,69,58,.1); }
 .node-create-form { display: grid; grid-template-columns: repeat(3, minmax(170px, 1fr)); gap: 12px 9px; padding: 16px 17px; }
 .node-create-form label { display: grid; gap: 5px; min-width: 0; font-size: 10px; }
@@ -482,6 +489,13 @@ input { padding: 12px 13px; }
   .node-actions { flex-wrap: wrap; justify-content: flex-end; }
   .key-reveal { grid-template-columns: 1fr auto; }
   .key-reveal code { grid-column: 1 / -1; grid-row: 2; }
+}
+
+@media (max-width: 640px) {
+  .node-list { max-height: min(52vh, 470px); }
+  .node-row { flex-wrap: wrap; gap: 10px; padding: 14px; }
+  .node-main { flex-basis: calc(100% - 24px); }
+  .node-actions { width: 100%; padding-left: 23px; justify-content: flex-end; }
 }
 
 @media (max-width: 520px) {
