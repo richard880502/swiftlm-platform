@@ -16,6 +16,7 @@
   --green: #30d158;
   --yellow: #ffd60a;
   --danger: #ff453a;
+  --chat-gutter: clamp(15px, 4vw, 65px);
   --shadow: 0 36px 100px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.32);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
 }
@@ -320,8 +321,8 @@ input { padding: 12px 13px; }
 .hero-orb::before { content: ""; position: absolute; inset: 7px; border: 1px solid rgba(255,255,255,.16); border-radius: 23px; }
 .hero-orb span { font-size: 39px; font-weight: 750; text-shadow: 0 4px 14px rgba(0,0,0,.26); transform: rotate(3deg); }
 .chat-view { display: flex; flex: 1; min-height: 0; flex-direction: column; }
-.message-list { flex: 1; overflow-y: auto; padding: 27px clamp(20px, 5vw, 80px); scroll-behavior: smooth; }
-.message { display: flex; gap: 13px; max-width: 880px; margin: 0 auto 26px; }
+.message-list { flex: 1; overflow-y: auto; padding: 27px var(--chat-gutter); scroll-behavior: smooth; }
+.message { display: flex; gap: 13px; width: min(1120px, 100%); margin: 0 0 26px; }
 .message-avatar {
   display: grid;
   place-items: center;
@@ -346,7 +347,7 @@ input { padding: 12px 13px; }
 .message.pending .message-content::after { content: "▋"; color: #74baff; animation: blink .8s infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 .composer {
-  margin: 0 clamp(15px, 4vw, 65px) 20px;
+  margin: 0 var(--chat-gutter) 20px;
   padding: 10px 11px 9px 15px;
   border: 1px solid rgba(255,255,255,.13);
   border-radius: 17px;
