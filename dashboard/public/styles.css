@@ -436,7 +436,7 @@ input { padding: 12px 13px; }
   scrollbar-gutter: stable;
 }
 .node-list:focus-visible { outline: 2px solid rgba(10,132,255,.72); outline-offset: -2px; }
-.node-row { display: flex; align-items: flex-start; gap: 13px; padding: 15px 17px; border-bottom: 1px solid var(--line-soft); }
+.node-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 13px; padding: 15px 17px; border-bottom: 1px solid var(--line-soft); }
 .node-row:last-child { border-bottom: 0; }
 .node-row:hover { background: rgba(255,255,255,.025); }
 .node-row.disabled { opacity: .58; }
@@ -450,6 +450,10 @@ input { padding: 12px 13px; }
 .node-main small { color: #aeb0b7; }
 .node-actions { display: flex; flex: 0 0 auto; gap: 7px; align-items: center; }
 .subtle-danger { background: rgba(255,69,58,.1); }
+.node-key-update { display: flex; flex: 1 0 100%; align-items: end; gap: 8px; margin: 1px 0 0 23px; padding: 11px; border: 1px solid rgba(10,132,255,.22); border-radius: 10px; background: rgba(10,132,255,.06); }
+.node-key-update label { display: grid; flex: 1; gap: 5px; min-width: 0; font-size: 10px; }
+.node-key-update input { min-width: 0; height: 35px; font-size: 11px; }
+.node-key-update .primary, .node-key-update .toolbar-button { height: 35px; padding: 7px 11px; white-space: nowrap; }
 .node-create-form { display: grid; grid-template-columns: repeat(3, minmax(170px, 1fr)); gap: 12px 9px; padding: 16px 17px; }
 .node-create-form label { display: grid; gap: 5px; min-width: 0; font-size: 10px; }
 .node-create-form input { min-width: 0; height: 37px; font-size: 11px; }
@@ -487,6 +491,7 @@ input { padding: 12px 13px; }
   .key-create-form select { flex: 1; }
   .node-create-form { grid-template-columns: 1fr 1fr; }
   .node-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .node-key-update { flex-wrap: wrap; }
   .key-reveal { grid-template-columns: 1fr auto; }
   .key-reveal code { grid-column: 1 / -1; grid-row: 2; }
 }
@@ -496,6 +501,7 @@ input { padding: 12px 13px; }
   .node-row { flex-wrap: wrap; gap: 10px; padding: 14px; }
   .node-main { flex-basis: calc(100% - 24px); }
   .node-actions { width: 100%; padding-left: 23px; justify-content: flex-end; }
+  .node-key-update { margin-left: 23px; }
 }
 
 @media (max-width: 520px) {

@@ -88,6 +88,9 @@ test("keys, conversations, and request records stay bound to their selected node
   assert.equal(store.authenticateApiKey("digest-2").upstream_api_key, "studio-node-api-key");
   assert.equal(store.getNode(node.id).upstream_api_key, undefined);
   assert.equal(store.getNodeForProxy(node.id).upstream_api_key, "studio-node-api-key");
+  assert.equal(store.updateNodeUpstreamKey(node.id, "studio-node-key-rotated"), true);
+  assert.equal(store.getNodeForProxy(node.id).upstream_api_key, "studio-node-key-rotated");
+  assert.equal(store.getNode(node.id).upstream_api_key, undefined);
   assert.equal(store.getConversation(conversation.id).node_name, "Mac Studio");
   assert.equal(store.listRequests()[0].node_id, node.id);
   assert.equal(store.listRequests()[0].node_name, "Mac Studio");
@@ -95,6 +98,11 @@ test("keys, conversations, and request records stay bound to their selected node
   assert.equal(store.listRequests()[0].ttft_ms, 30);
   assert.equal(store.getNodeUsage(node.id).api_key_count, 1);
   assert.equal(store.deleteNode(node.id), false);
+  assert.equal(store.deleteNode(node.id, { purge: true }), true);
+  assert.equal(store.getNode(node.id), null);
+  assert.equal(store.listApiKeys().length, 0);
+  assert.equal(store.listRequests().length, 0);
+  assert.equal(store.getConversation(conversation.id), null);
   store.close();
 });
 

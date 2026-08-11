@@ -220,6 +220,22 @@ app.post("/api/nodes/:id/enabled", requireAdmin, (req, res) => {
   return res.json(store.getNode(id));
 });
 
+app.patch("/api/nodes/:id/upstream-key", requireAdmin, (req, res) => {
+  const id = safeNodeId(req.params.id);
+  if (id === config.defaultNode.id) {
+    return res.status(400).json({
+      error: { message: "預設機器的上游 Key 由 Zeabur 環境設定管理，無法在此修改。" },
+    });
+  }
+  if (!store.getNode(id)) return res.status(404).json({ error: { message: "Node not found" } });
+  const upstreamApiKey = String(req.body?.upstream_api_key || "").trim();
+  if (!upstreamApiKey) {
+    return res.status(400).json({ error: { message: "請輸入新的上游 API Key" } });
+  }
+  store.updateNodeUpstreamKey(id, upstreamApiKey);
+  return res.json({ ok: true, node: store.getNode(id) });
+});
+
 app.delete("/api/nodes/:id", requireAdmin, (req, res) => {
   const id = safeNodeId(req.params.id);
   if (id === config.defaultNode.id) {
@@ -228,15 +244,18 @@ app.delete("/api/nodes/:id", requireAdmin, (req, res) => {
   const node = store.getNode(id);
   if (!node) return res.status(404).json({ error: { message: "Node not found" } });
   const usage = store.getNodeUsage(id);
-  if (usage.api_key_count || usage.conversation_count || usage.request_count) {
+  const purge = req.body?.purge === true;
+  if ((usage.api_key_count || usage.conversation_count || usage.request_count) && !purge) {
     return res.status(409).json({
       error: {
-        message: `此機器仍有 ${usage.api_key_count} 把 API Key、${usage.conversation_count} 個對話與 ${usage.request_count} 筆使用紀錄；請先清理這些資料後再刪除。`,
+        message: `此機器仍有 ${usage.api_key_count} 把 API Key、${usage.conversation_count} 個對話與 ${usage.request_count} 筆使用紀錄；請明確確認後再刪除。`,
       },
     });
   }
-  store.deleteNode(id);
-  return res.json({ ok: true });
+  const deleted = store.deleteNode(id, { purge });
+  return res.status(deleted ? 200 : 409).json(deleted
+    ? { ok: true, purged: usage }
+    : { error: { message: "無法刪除這台機器" } });
 });
 
 app.get("/api/keys", requireAdmin, (_req, res) => res.json({ data: store.listApiKeys() }));

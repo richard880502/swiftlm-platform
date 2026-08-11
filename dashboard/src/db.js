@@ -162,12 +162,18 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
       FROM nodes WHERE id = ?
     `),
     setNodeEnabled: db.prepare("UPDATE nodes SET enabled = ?, updated_at = ? WHERE id = ?"),
+    updateNodeUpstreamKey: db.prepare(
+      "UPDATE nodes SET upstream_api_key = ?, updated_at = ? WHERE id = ?",
+    ),
     nodeUsage: db.prepare(`
       SELECT
         (SELECT COUNT(*) FROM api_keys WHERE node_id = ?) AS api_key_count,
         (SELECT COUNT(*) FROM conversations WHERE node_id = ?) AS conversation_count,
         (SELECT COUNT(*) FROM api_requests WHERE node_id = ?) AS request_count
     `),
+    deleteNodeRequests: db.prepare("DELETE FROM api_requests WHERE node_id = ?"),
+    deleteNodeKeys: db.prepare("DELETE FROM api_keys WHERE node_id = ?"),
+    deleteNodeConversations: db.prepare("DELETE FROM conversations WHERE node_id = ?"),
     deleteNode: db.prepare("DELETE FROM nodes WHERE id = ?"),
     insertKey: db.prepare(`
       INSERT INTO api_keys(id, name, prefix, digest, node_id, created_at)
@@ -256,13 +262,30 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
     setNodeEnabled(id, enabled) {
       return statements.setNodeEnabled.run(enabled ? 1 : 0, now(), id).changes > 0;
     },
+    updateNodeUpstreamKey(id, upstreamApiKey) {
+      return statements.updateNodeUpstreamKey.run(
+        encryptNodeKey(upstreamApiKey, nodeKey), now(), id,
+      ).changes > 0;
+    },
     getNodeUsage(id) {
       return statements.nodeUsage.get(id, id, id);
     },
-    deleteNode(id) {
+    deleteNode(id, { purge = false } = {}) {
       const usage = statements.nodeUsage.get(id, id, id);
-      if (usage.api_key_count || usage.conversation_count || usage.request_count) return false;
-      return statements.deleteNode.run(id).changes > 0;
+      if ((usage.api_key_count || usage.conversation_count || usage.request_count) && !purge) return false;
+      if (!purge) return statements.deleteNode.run(id).changes > 0;
+      try {
+        db.exec("BEGIN IMMEDIATE");
+        statements.deleteNodeRequests.run(id);
+        statements.deleteNodeKeys.run(id);
+        statements.deleteNodeConversations.run(id);
+        const deleted = statements.deleteNode.run(id).changes > 0;
+        db.exec("COMMIT");
+        return deleted;
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
     },
     createApiKey({ id, name, prefix, digest, nodeId }) {
       statements.insertKey.run(id, name, prefix, digest, nodeId, now());

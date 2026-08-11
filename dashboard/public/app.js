@@ -9,6 +9,7 @@ const state = {
   query: "",
   generationPollTimer: null,
   statusPollTimer: null,
+  editingNodeId: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -217,7 +218,7 @@ async function loadNodes() {
     state.nodes = result.data || [];
     renderNodeOptions();
     updateNodeStatus();
-    if (state.currentView === "nodes") renderNodes();
+    if (state.currentView === "nodes" && !state.editingNodeId) renderNodes();
   } catch {
     state.nodes = [];
     updateNodeStatus();
@@ -586,6 +587,7 @@ function renderNodes() {
       : node.status?.state === "disabled" ? "已停用" : "離線";
     const latency = node.status?.latency_ms == null ? "—" : `${formatNumber(node.status.latency_ms)} ms`;
     const canDelete = !node.is_default;
+    const editingKey = state.editingNodeId === node.id;
     return `
       <article class="node-row ${node.enabled ? "" : "disabled"}">
         <span class="node-indicator ${escapeHtml(node.status?.state || "offline")}" aria-hidden="true"></span>
@@ -598,8 +600,16 @@ function renderNodes() {
           <button class="${node.enabled ? "danger-button" : "toolbar-button"}" data-toggle-node="${escapeHtml(node.id)}" data-node-enabled="${node.enabled ? "0" : "1"}">
             ${node.enabled ? "停用" : "啟用"}
           </button>
+          ${canDelete ? `<button class="toolbar-button" data-edit-node-key="${escapeHtml(node.id)}">更新 Key</button>` : ""}
           ${canDelete ? `<button class="danger-button subtle-danger" data-delete-node="${escapeHtml(node.id)}">刪除</button>` : ""}
         </div>
+        ${editingKey ? `
+          <form class="node-key-update" data-node-key-form="${escapeHtml(node.id)}">
+            <label>新的上游 API Key<input name="upstream_api_key" type="password" autocomplete="new-password" placeholder="貼上新的 API Key" required /></label>
+            <button class="primary" type="submit">儲存</button>
+            <button class="toolbar-button" type="button" data-cancel-node-key>取消</button>
+          </form>
+        ` : ""}
       </article>
     `;
   }).join("") : '<div class="empty-list"><strong>尚未加入機器</strong><span>加入已透過 Wonder Mesh 發布的 SwiftLM Origin。</span></div>';
@@ -620,11 +630,49 @@ function renderNodes() {
   });
   elements.nodeList.querySelectorAll("[data-delete-node]").forEach((button) => {
     button.addEventListener("click", async () => {
-      if (!confirm("確定刪除這台機器？已建立 API Key、對話或使用紀錄的機器不可刪除。")) return;
+      const node = state.nodes.find((item) => item.id === button.dataset.deleteNode);
+      const usage = node?.usage || {};
+      const consequences = [
+        `${usage.api_key_count || 0} 把 API Key`,
+        `${usage.conversation_count || 0} 個對話`,
+        `${usage.request_count || 0} 筆使用紀錄`,
+      ].join("、");
+      if (!confirm(`確定刪除「${node?.name || "這台機器"}」？\n\n這會一併撤銷／刪除：${consequences}。\n此動作無法復原。`)) return;
       try {
-        await request(`/api/nodes/${button.dataset.deleteNode}`, { method: "DELETE" });
+        await request(`/api/nodes/${button.dataset.deleteNode}`, {
+          method: "DELETE", body: JSON.stringify({ purge: true }),
+        });
         await loadNodes();
-        showToast("機器已刪除");
+        showToast("機器與相關資料已刪除");
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+  elements.nodeList.querySelectorAll("[data-edit-node-key]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.editingNodeId = button.dataset.editNodeKey;
+      renderNodes();
+      elements.nodeList.querySelector("[data-node-key-form] input")?.focus();
+    });
+  });
+  elements.nodeList.querySelectorAll("[data-cancel-node-key]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.editingNodeId = null;
+      renderNodes();
+    });
+  });
+  elements.nodeList.querySelectorAll("[data-node-key-form]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const key = new FormData(form).get("upstream_api_key");
+      try {
+        await request(`/api/nodes/${form.dataset.nodeKeyForm}/upstream-key`, {
+          method: "PATCH", body: JSON.stringify({ upstream_api_key: key }),
+        });
+        state.editingNodeId = null;
+        await loadNodes();
+        showToast("上游 API Key 已更新");
       } catch (error) {
         showToast(error.message);
       }
