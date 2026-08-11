@@ -10,6 +10,7 @@ const state = {
   generationPollTimer: null,
   statusPollTimer: null,
   editingNodeId: null,
+  stopping: false,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -295,7 +296,11 @@ function updateConversationHeader() {
     : `${state.current.node_name} · ${state.current.model_name} · ${state.current.messages.length} 則訊息`;
   elements.deleteConversationButton.classList.remove("hidden");
   elements.deleteConversationButton.disabled = busy;
-  elements.sendButton.disabled = busy;
+  elements.sendButton.disabled = state.stopping;
+  elements.sendButton.type = busy ? "button" : "submit";
+  elements.sendButton.textContent = busy ? "■" : "↑";
+  elements.sendButton.setAttribute("aria-label", busy ? "停止生成" : "傳送");
+  elements.sendButton.classList.toggle("stop-button", busy);
   elements.messageInput.disabled = busy;
   const targetLocked = busy || state.current.messages.length > 0;
   elements.conversationNode.disabled = targetLocked;
@@ -386,10 +391,11 @@ async function sendMessage(event) {
   const content = elements.messageInput.value.trim();
   if (!content || !state.current || state.sending || state.current.generation_in_progress) return;
 
+  const conversationId = state.current.id;
   state.sending = true;
+  state.stopping = false;
   state.current.generation_in_progress = true;
-  elements.sendButton.disabled = true;
-  elements.deleteConversationButton.disabled = true;
+  updateConversationHeader();
   clearComposerInput(elements.messageInput);
   state.current.messages.push({ role: "user", content, created_at: new Date().toISOString() });
   renderMessages();
@@ -399,7 +405,7 @@ async function sendMessage(event) {
   scrollMessages();
 
   try {
-    const response = await fetch(`/api/conversations/${state.current.id}/messages`, {
+    const response = await fetch(`/api/conversations/${conversationId}/messages`, {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
@@ -419,6 +425,7 @@ async function sendMessage(event) {
     const decoder = new TextDecoder();
     let buffer = "";
     let assistant = "";
+    let stopped = false;
 
     const consume = (eventText) => {
       const eventName = eventText.split("\n").find((line) => line.startsWith("event:"))?.slice(6).trim();
@@ -426,6 +433,10 @@ async function sendMessage(event) {
         .filter((line) => line.startsWith("data:"))
         .map((line) => line.slice(5).trimStart()).join("\n");
       if (!data || data === "[DONE]" || eventName === "dashboard") return;
+      if (eventName === "stopped") {
+        stopped = true;
+        return;
+      }
       if (eventName === "error") throw new Error(JSON.parse(data).message || "串流失敗");
       try {
         assistant += JSON.parse(data).choices?.[0]?.delta?.content || "";
@@ -448,19 +459,38 @@ async function sendMessage(event) {
     }
     if (buffer.trim()) consume(buffer);
     pending.classList.remove("pending");
-    await loadConversations(state.current.id);
+    if (state.current?.id === conversationId) {
+      state.current = await request(`/api/conversations/${conversationId}`);
+      state.current.generation_in_progress = false;
+      updateConversationHeader();
+      renderMessages();
+      await loadConversations();
+      showToast(stopped ? "已停止生成" : "回答已完成");
+    }
   } catch (error) {
-    state.current.generation_in_progress = false;
+    if (state.current?.id === conversationId) state.current.generation_in_progress = false;
     pending.classList.remove("pending");
     output.textContent = `請求失敗：${error.message}`;
     await loadNodes();
   } finally {
     state.sending = false;
-    const stillGenerating = Boolean(state.current?.generation_in_progress);
-    elements.sendButton.disabled = stillGenerating;
-    elements.deleteConversationButton.disabled = stillGenerating;
-    elements.messageInput.disabled = stillGenerating;
-    if (!stillGenerating) elements.messageInput.focus();
+    state.stopping = false;
+    if (state.current?.id === conversationId) updateConversationHeader();
+    if (!state.current?.generation_in_progress) elements.messageInput.focus();
+  }
+}
+
+async function stopCurrentGeneration() {
+  if (!state.current || (!state.sending && !state.current.generation_in_progress) || state.stopping) return;
+  state.stopping = true;
+  updateConversationHeader();
+  try {
+    await request(`/api/conversations/${state.current.id}/stop`, { method: "POST" });
+    showToast("正在停止生成…");
+  } catch (error) {
+    state.stopping = false;
+    updateConversationHeader();
+    showToast(error.message);
   }
 }
 
@@ -769,6 +799,12 @@ elements.conversationSearch.addEventListener("input", () => {
   renderConversationList();
 });
 elements.composer.addEventListener("submit", sendMessage);
+elements.sendButton.addEventListener("click", (event) => {
+  if (state.sending || state.current?.generation_in_progress) {
+    event.preventDefault();
+    stopCurrentGeneration();
+  }
+});
 elements.messageInput.addEventListener("input", resizeComposer);
 elements.messageInput.addEventListener("keydown", (event) => {
   if (shouldSubmitComposer(event)) {

@@ -23,7 +23,9 @@ const store = createStore(config.databasePath, {
 const app = express();
 const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public");
 const loginAttempts = new Map();
-const activeGenerations = new Set();
+// Keep cancellation handles server-side. A browser disconnect intentionally does not
+// abort generation, but an explicit stop action must cancel the upstream stream.
+const activeGenerations = new Map();
 
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
@@ -341,6 +343,15 @@ app.delete("/api/conversations/:id", requireAdmin, (req, res) => {
   res.status(deleted ? 200 : 404).json({ ok: deleted });
 });
 
+app.post("/api/conversations/:id/stop", requireAdmin, (req, res) => {
+  const controller = activeGenerations.get(req.params.id);
+  if (!controller) {
+    return res.status(409).json({ error: { message: "目前沒有進行中的生成" } });
+  }
+  if (!controller.signal.aborted) controller.abort();
+  return res.status(202).json({ ok: true, state: "stopping" });
+});
+
 app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
   const conversation = store.getConversation(req.params.id);
   if (!conversation) return res.status(404).json({ error: { message: "Conversation not found" } });
@@ -357,7 +368,8 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
     return res.status(503).json({ error: { message: "這台機器或模型目前無法使用" } });
   }
 
-  activeGenerations.add(conversation.id);
+  const abortController = new AbortController();
+  activeGenerations.set(conversation.id, abortController);
   try {
     store.addMessage(conversation.id, "user", content);
     if (conversation.messages.length === 0 && conversation.title === "新對話") {
@@ -383,17 +395,18 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
       node: proxyNode,
       requestBody,
       response: res,
+      signal: abortController.signal,
       onProgress: ({ assistant }) => {
         store.updateMessageContent(assistantMessage.id, conversation.id, assistant);
       },
-      onComplete: ({ assistant, usage, metrics, completed = true }) => {
+      onComplete: ({ assistant, usage, metrics, completed = true, cancelled = false }) => {
         store.updateMessageContent(assistantMessage.id, conversation.id, assistant);
         const message = { ...assistantMessage, content: assistant };
         store.recordRequest({
           route: "/api/conversations/:id/messages",
           nodeId: node.id,
           model: node.model_id,
-          status: completed ? 200 : 502,
+          status: cancelled ? 499 : completed ? 200 : 502,
           latencyMs: Date.now() - started,
           promptTokens: metrics?.prompt_tokens ?? usage?.prompt_tokens,
           completionTokens: metrics?.completion_tokens ?? usage?.completion_tokens,
@@ -407,7 +420,9 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
       },
     });
   } finally {
-    activeGenerations.delete(conversation.id);
+    if (activeGenerations.get(conversation.id) === abortController) {
+      activeGenerations.delete(conversation.id);
+    }
   }
 });
 

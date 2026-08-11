@@ -33,7 +33,9 @@ export async function upstreamJson(config, node, path, body, { signal } = {}) {
   return { response, data, text };
 }
 
-export async function streamDashboardChat({ config, node, requestBody, response, onProgress, onComplete }) {
+export async function streamDashboardChat({
+  config, node, requestBody, response, onProgress, onComplete, signal,
+}) {
   let clientConnected = true;
   let completionAttempted = false;
   response.on("close", () => {
@@ -53,6 +55,7 @@ export async function streamDashboardChat({ config, node, requestBody, response,
       // SwiftLM only sends usage in its final SSE chunk when explicitly requested.
       stream_options: { ...requestBody.stream_options, include_usage: true },
     }),
+    signal,
   });
 
   if (!upstream.ok || !upstream.body) {
@@ -85,10 +88,10 @@ export async function streamDashboardChat({ config, node, requestBody, response,
   const emitData = (data) => {
     if (canWrite()) response.write(`data: ${data}\n\n`);
   };
-  const persistCompletion = async (completed) => {
-    if (completionAttempted || !assistant.trim()) return null;
+  const persistCompletion = async (completed, { cancelled = false } = {}) => {
+    if (completionAttempted || (!assistant.trim() && !cancelled)) return null;
     completionAttempted = true;
-    return onComplete({ assistant, usage, metrics, completed });
+    return onComplete({ assistant, usage, metrics, completed, cancelled });
   };
   const persistProgress = async () => {
     if (!onProgress || assistant === lastPersistedAssistant) return;
@@ -141,8 +144,21 @@ export async function streamDashboardChat({ config, node, requestBody, response,
     emitData("[DONE]");
     if (canWrite()) response.end();
   } catch (error) {
+    const cancelled = Boolean(signal?.aborted);
     try {
-      await persistCompletion(false);
+      const saved = await persistCompletion(false, { cancelled });
+      if (cancelled && canWrite()) {
+        if (!response.headersSent) {
+          response.status(200);
+          response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+          response.setHeader("Cache-Control", "no-cache, no-transform");
+          response.flushHeaders();
+        }
+        response.write(`event: stopped\ndata: ${JSON.stringify(saved)}\n\n`);
+        emitData("[DONE]");
+        response.end();
+        return;
+      }
     } catch {
       // Preserve the original streaming error for the connected client.
     }

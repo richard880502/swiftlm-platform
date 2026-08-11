@@ -63,6 +63,10 @@ https://richard-swiftlm-origin-7165.zeabur.app/v1
 
 預設機器不能刪除。其他機器可隨時刪除；Dashboard 會先列出影響範圍並要求確認。確認後，該節點的 Dashboard API Key、對話與使用紀錄會一併永久刪除。
 
+## 停止生成
+
+對話生成期間，輸入框右下角會顯示紅色停止按鈕。點擊後 Dashboard 會明確取消該次上游串流並通知 MLX Gateway 取消本機工作；已生成的文字會保留，對話可立即繼續。重新整理頁面不會觸發取消，只有按下停止按鈕才會中止生成。
+
 Dashboard API Key 是節點綁定的 client credential，不是 SwiftLM Master Key。客戶仍呼叫同一個公開 endpoint：
 
 ```text

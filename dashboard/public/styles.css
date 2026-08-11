@@ -369,6 +369,7 @@ input { padding: 12px 13px; }
 .toggle input:checked + span::after { left: 14px; }
 .send-button { display: grid; place-items: center; width: 34px; height: 34px; color: white; font-size: 19px; border: 0; border-radius: 10px; background: linear-gradient(180deg, #2997ff, #087cf0); box-shadow: inset 0 1px rgba(255,255,255,.3), 0 6px 15px rgba(0,91,215,.22); }
 .send-button:disabled { opacity: .35; }
+.send-button.stop-button { color: #fff5f4; font-size: 13px; background: linear-gradient(180deg, #ff6259, #d9342c); box-shadow: inset 0 1px rgba(255,255,255,.28), 0 6px 15px rgba(174,31,25,.26); }
 
 /* Usage and API Keys */
 .management-view { gap: 14px; overflow-y: auto; padding: 22px; }
