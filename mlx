@@ -106,6 +106,7 @@ start_server() {
       --stream-experts
     )
     [[ "$TURBO_KV" == "1" ]] && swiftlm_args+=(--turbo-kv)
+    [[ "$MTP_ENABLED" == "1" ]] && swiftlm_args+=(--mtp --num-mtp-tokens "$NUM_MTP_TOKENS")
     [[ -n "$API_KEY" ]] && swiftlm_args+=(--api-key "$API_KEY")
 
     export SWIFTLM_TOP_K
