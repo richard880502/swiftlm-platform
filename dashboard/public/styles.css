@@ -373,7 +373,16 @@ input { padding: 12px 13px; }
 .send-button.stop-button { color: #fff5f4; font-size: 13px; background: linear-gradient(180deg, #ff6259, #d9342c); box-shadow: inset 0 1px rgba(255,255,255,.28), 0 6px 15px rgba(174,31,25,.26); }
 
 /* Usage and API Keys */
+/* .management-view is a column flexbox (via .workspace-view); its direct
+   children default to flex-shrink: 1, so on a short viewport the browser
+   silently squeezes a card below the height its own content needs instead of
+   growing the page. Since .content-card also clips with overflow: hidden,
+   a squeezed card's overflow isn't just visually tight, it's invisible and
+   unreachable -- no scrollbar appears anywhere to reveal it. flex-shrink: 0
+   keeps every card and the summary grid at their natural height, so
+   .management-view's own overflow-y: auto scrolls the page instead. */
 .management-view { gap: 14px; overflow-y: auto; padding: 22px; }
+.management-view > * { flex-shrink: 0; }
 .summary-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .summary-card, .content-card, .key-reveal {
   border: 1px solid var(--line);
