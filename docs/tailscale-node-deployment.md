@@ -44,6 +44,8 @@ Backend（vLLM / SwiftLM / ...），只聽 127.0.0.1
 
 4. **設定 Tailscale ACL，只允許 Dashboard 的裝置連到這個 port**：在 Tailscale 管理後台（或 `acl.hujson`）限制只有 Dashboard 的 tailnet 身分能存取這台 VM 的對應 port/tag。沒有寫進 ACL 的裝置，連 TCP 都連不上，不會走到任何 HTTP 層。
 
+如果內部網域本來就互通，一個 relay 可以同時幫多台機器轉發，不用每台都架一個 VM，見 [一個 relay 轉發多台內部機器](multi-backend-relay.md)。
+
 ## Dashboard 端
 
 在「機器」頁面手動加入節點：
