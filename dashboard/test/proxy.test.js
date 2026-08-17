@@ -2,8 +2,12 @@ import { EventEmitter } from "node:events";
 import http from "node:http";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolveCredential, streamDashboardChat, upstreamHeaders } from "../src/proxy.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { proxyOpenAI, resolveCredential, streamDashboardChat, upstreamHeaders } from "../src/proxy.js";
 import { verify } from "../src/nodeAuth.js";
+import { createStore } from "../src/db.js";
 
 class DisconnectingResponse extends EventEmitter {
   constructor() {
@@ -248,4 +252,114 @@ test("explicit cancellation stops the upstream stream and preserves partial outp
     new Promise((resolve) => setTimeout(() => resolve(false), 100)),
   ]);
   assert.equal(closed, true);
+});
+
+class FakeApiResponse {
+  constructor() {
+    this.statusCode = null;
+    this.headers = {};
+    this.body = null;
+    this.headersSent = false;
+  }
+
+  status(code) {
+    this.statusCode = code;
+    this.headersSent = true;
+    return this;
+  }
+
+  setHeader(name, value) {
+    this.headers[name] = value;
+  }
+
+  json(value) {
+    this.body = value;
+    return this;
+  }
+
+  send(value) {
+    this.body = value;
+    return this;
+  }
+}
+
+function listen(server) {
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
+}
+
+test("a node with two registered models forwards whichever one the client asked for", async (t) => {
+  const receivedBodies = [];
+  const upstream = http.createServer((request, response) => {
+    let raw = "";
+    request.on("data", (chunk) => { raw += chunk; });
+    request.on("end", () => {
+      if (request.url === "/models") {
+        response.writeHead(200, { "content-type": "application/json" });
+        return response.end(JSON.stringify({ object: "list", data: [] }));
+      }
+      receivedBodies.push(JSON.parse(raw));
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        id: "chatcmpl-1",
+        choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }));
+    });
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "swiftlm-proxy-multimodel-test-"));
+  const store = createStore(path.join(directory, "test.sqlite"), {
+    defaultNode: {
+      id: "mac-mini", name: "Mac mini", originBaseUrl: "https://unused.example/v1",
+      modelId: "unused-model", modelName: "unused", upstreamApiKey: "unused",
+    },
+    nodeSecret: "test-secret",
+  });
+  t.after(() => store.close());
+  const node = store.createNode({
+    id: "multi-node", name: "Multi", originBaseUrl: `http://127.0.0.1:${port}`,
+    modelId: "model-a", modelName: "Model A", provider: "vllm", authType: "none",
+  });
+  store.addNodeModel(node.id, { modelId: "model-b", modelName: "Model B" });
+  store.createApiKey({ id: "key-1", name: "Test", prefix: "sk-mlx-test…", digest: "digest-1", nodeId: node.id });
+  const config = { defaultNode: { id: "mac-mini" } };
+  const apiKey = {
+    id: "key-1", node_id: node.id, node_name: node.name, origin_base_url: node.origin_base_url,
+    model_id: node.model_id, model_name: node.model_name, upstream_api_key: null, node_secret: null,
+    provider: node.provider, protocol: node.protocol, auth_type: node.auth_type, auth_header: null,
+  };
+
+  const modelsRes = new FakeApiResponse();
+  await proxyOpenAI({
+    config, store, apiKey,
+    req: { path: "/v1/models", method: "GET", headers: {} },
+    res: modelsRes,
+  });
+  assert.deepEqual(modelsRes.body.data.map((m) => m.id).sort(), ["model-a", "model-b"]);
+
+  const secondModelRes = new FakeApiResponse();
+  await proxyOpenAI({
+    config, store, apiKey,
+    req: {
+      path: "/v1/chat/completions", method: "POST", headers: {},
+      body: { model: "model-b", messages: [{ role: "user", content: "hi" }] },
+    },
+    res: secondModelRes,
+  });
+  assert.equal(secondModelRes.statusCode, 200, JSON.stringify(secondModelRes.body));
+  assert.equal(receivedBodies[0].model, "model-b", "the requested model must reach upstream unmodified");
+
+  const rejectedRes = new FakeApiResponse();
+  await proxyOpenAI({
+    config, store, apiKey,
+    req: {
+      path: "/v1/chat/completions", method: "POST", headers: {},
+      body: { model: "model-c", messages: [] },
+    },
+    res: rejectedRes,
+  });
+  assert.equal(rejectedRes.statusCode, 400);
+  assert.equal(receivedBodies.length, 1, "an unregistered model must never reach upstream");
 });

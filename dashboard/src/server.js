@@ -202,6 +202,7 @@ async function nodeWithStatus(node) {
     is_default: node.id === config.defaultNode.id,
     usage: store.getNodeUsage(node.id),
     status: await checkNode(node),
+    models: store.listNodeModels(node.id),
   };
 }
 
@@ -409,6 +410,58 @@ app.delete("/api/nodes/:id", requireAdmin, (req, res) => {
     : { error: { message: "無法刪除這台機器" } });
 });
 
+// A node's model set only makes sense for a backend that natively multiplexes
+// several models behind the one endpoint it already has (vLLM, Ollama, LM
+// Studio, ...) -- a second physical port is a second node, not a second entry
+// here. See docs/inference-nodes.md.
+app.get("/api/nodes/:id/models", requireAdmin, (req, res) => {
+  const id = safeNodeId(req.params.id);
+  if (!store.getNode(id)) return res.status(404).json({ error: { message: "Node not found" } });
+  res.json({ data: store.listNodeModels(id) });
+});
+
+app.post("/api/nodes/:id/models", requireAdmin, (req, res) => {
+  const id = safeNodeId(req.params.id);
+  if (!store.getNode(id)) return res.status(404).json({ error: { message: "Node not found" } });
+  const modelId = String(req.body?.model_id || "").trim().slice(0, 240);
+  const modelName = String(req.body?.model_name || modelId).trim().slice(0, 120);
+  if (!modelId) return res.status(400).json({ error: { message: "請輸入模型 ID" } });
+  try {
+    const models = store.addNodeModel(id, { modelId, modelName });
+    return res.status(201).json({ data: models });
+  } catch (error) {
+    return res.status(409).json({
+      error: { message: error.message.includes("UNIQUE") ? "這個模型已經在這台機器上" : "無法新增模型" },
+    });
+  }
+});
+
+app.patch("/api/nodes/:id/models/:modelRowId/enabled", requireAdmin, (req, res) => {
+  const id = safeNodeId(req.params.id);
+  if (!store.getNode(id)) return res.status(404).json({ error: { message: "Node not found" } });
+  const enabled = Boolean(req.body?.enabled);
+  const updated = store.setNodeModelEnabled(id, req.params.modelRowId, enabled);
+  return res.status(updated ? 200 : 404).json(updated
+    ? { data: store.listNodeModels(id) }
+    : { error: { message: "Model not found" } });
+});
+
+app.delete("/api/nodes/:id/models/:modelRowId", requireAdmin, (req, res) => {
+  const id = safeNodeId(req.params.id);
+  if (!store.getNode(id)) return res.status(404).json({ error: { message: "Node not found" } });
+  const result = store.deleteNodeModel(id, req.params.modelRowId);
+  if (!result.ok) {
+    return res.status(result.reason === "last_model" ? 409 : 404).json({
+      error: {
+        message: result.reason === "last_model"
+          ? "機器至少要保留一個模型；請改為刪除整台機器。"
+          : "Model not found",
+      },
+    });
+  }
+  return res.json({ data: store.listNodeModels(id) });
+});
+
 function enrollmentTokenState(token) {
   if (token.used_at) return "used";
   if (Date.parse(token.expires_at) <= Date.now()) return "expired";
@@ -568,7 +621,7 @@ app.post("/api/conversations", requireAdmin, (req, res) => {
   const node = resolveEnabledNode(nodeId);
   if (!node) return res.status(400).json({ error: { message: "請選擇一台可用的機器" } });
   const modelId = String(req.body?.model_id || node.model_id).trim();
-  if (modelId !== node.model_id) {
+  if (!store.isModelAllowedOnNode(node.id, modelId)) {
     return res.status(400).json({ error: { message: "這台機器未提供指定模型" } });
   }
   const conversation = store.createConversation({
@@ -591,7 +644,7 @@ app.patch("/api/conversations/:id/target", requireAdmin, (req, res) => {
   const nodeId = safeNodeId(req.body?.node_id);
   const node = resolveEnabledNode(nodeId);
   const modelId = String(req.body?.model_id || "").trim();
-  if (!node || modelId !== node.model_id) {
+  if (!node || !modelId || !store.isModelAllowedOnNode(node.id, modelId)) {
     return res.status(400).json({ error: { message: "機器或模型無法使用" } });
   }
   store.updateConversationTarget(conversation.id, node.id, modelId);
@@ -631,7 +684,7 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
   if (content.length > 200_000) return res.status(413).json({ error: { message: "Message too large" } });
   const node = resolveEnabledNode(conversation.node_id);
   const proxyNode = resolveEnabledProxyNode(conversation.node_id);
-  if (!node || !proxyNode || conversation.model_id !== node.model_id) {
+  if (!node || !proxyNode || !store.isModelAllowedOnNode(node.id, conversation.model_id)) {
     return res.status(503).json({ error: { message: "這台機器或模型目前無法使用" } });
   }
 
@@ -644,7 +697,7 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
     }
     const updated = store.getConversation(conversation.id);
     const requestBody = {
-      model: node.model_id,
+      model: conversation.model_id,
       messages: [
         { role: "system", content: updated.system_prompt },
         ...updated.messages.map(({ role, content: messageContent }) => ({ role, content: messageContent })),
@@ -672,7 +725,7 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
         store.recordRequest({
           route: "/api/conversations/:id/messages",
           nodeId: node.id,
-          model: node.model_id,
+          model: conversation.model_id,
           status: cancelled ? 499 : completed ? 200 : 502,
           latencyMs: Date.now() - started,
           // The adapter already merged provider metrics with stream-observed usage,

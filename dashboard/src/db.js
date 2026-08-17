@@ -105,6 +105,22 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
       used_at TEXT,
       node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL
     );
+    -- One row per model an endpoint accepts in its "model" field. Deliberately has
+    -- no origin_base_url/credential override: a node is one network endpoint and
+    -- one node-agent identity, so a second physical port is a second node, not a
+    -- second row here. This only covers a backend that natively multiplexes
+    -- several models behind the one endpoint it already has (vLLM, Ollama,
+    -- LM Studio, ...).
+    CREATE TABLE IF NOT EXISTS node_models (
+      id TEXT PRIMARY KEY,
+      node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+      model_id TEXT NOT NULL,
+      model_name TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(node_id, model_id)
+    );
   `);
 
   // Keep existing installations compatible: SQLite cannot add a non-null foreign key
@@ -138,6 +154,7 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
     CREATE INDEX IF NOT EXISTS api_requests_node_idx ON api_requests(node_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS api_keys_node_idx ON api_keys(node_id);
     CREATE INDEX IF NOT EXISTS enrollment_tokens_expires_idx ON enrollment_tokens(expires_at);
+    CREATE INDEX IF NOT EXISTS node_models_node_idx ON node_models(node_id);
   `);
 
   if (!defaultNode?.id) throw new Error("A default SwiftLM node is required");
@@ -168,6 +185,20 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
     .run(defaultNode.id, defaultNode.modelId);
   db.prepare("UPDATE conversations SET model_id = ? WHERE model_id IS NULL").run(defaultNode.modelId);
   db.prepare("UPDATE api_requests SET node_id = ? WHERE node_id IS NULL").run(defaultNode.id);
+
+  // node_models is the single source of truth for "which models can this node
+  // serve" going forward; nodes.model_id/model_name stay only as the default a
+  // new conversation targets. Every node -- including ones created before this
+  // table existed, and the default node just upserted above -- must have at
+  // least its own primary model registered here.
+  db.prepare(`
+    INSERT INTO node_models(id, node_id, model_id, model_name, enabled, created_at, updated_at)
+    SELECT lower(hex(randomblob(16))), id, model_id, model_name, 1, updated_at, updated_at
+    FROM nodes
+    WHERE NOT EXISTS (
+      SELECT 1 FROM node_models WHERE node_models.node_id = nodes.id AND node_models.model_id = nodes.model_id
+    )
+  `).run();
 
   // Every node read shares one column list so a new backend descriptor field cannot
   // be exposed on one code path and silently missing on another.
@@ -215,6 +246,22 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
     deleteNodeKeys: db.prepare("DELETE FROM api_keys WHERE node_id = ?"),
     deleteNodeConversations: db.prepare("DELETE FROM conversations WHERE node_id = ?"),
     deleteNode: db.prepare("DELETE FROM nodes WHERE id = ?"),
+    listNodeModels: db.prepare(`
+      SELECT id, node_id, model_id, model_name, enabled, created_at, updated_at
+      FROM node_models WHERE node_id = ? ORDER BY created_at ASC
+    `),
+    getEnabledNodeModel: db.prepare(
+      "SELECT id, model_id, model_name FROM node_models WHERE node_id = ? AND model_id = ? AND enabled = 1",
+    ),
+    insertNodeModel: db.prepare(`
+      INSERT INTO node_models(id, node_id, model_id, model_name, enabled, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 1, ?, ?)
+    `),
+    setNodeModelEnabled: db.prepare(
+      "UPDATE node_models SET enabled = ?, updated_at = ? WHERE id = ? AND node_id = ?",
+    ),
+    getNodeModelById: db.prepare("SELECT id, model_id FROM node_models WHERE id = ? AND node_id = ?"),
+    deleteNodeModel: db.prepare("DELETE FROM node_models WHERE id = ? AND node_id = ?"),
     insertKey: db.prepare(`
       INSERT INTO api_keys(id, name, prefix, digest, node_id, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -331,9 +378,36 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
         capabilities ? JSON.stringify(capabilities) : null,
         encryptNodeKey(upstreamApiKey, nodeKey), createdAt, createdAt,
       );
+      // node_models is the source of truth for which models a node can serve, so
+      // creating a node always registers its own primary model there too.
+      statements.insertNodeModel.run(randomUUID(), id, modelId, modelName, createdAt, createdAt);
       return statements.getNode.get(id);
     },
     listNodes: () => statements.listNodes.all(),
+    listNodeModels: (nodeId) => statements.listNodeModels.all(nodeId),
+    isModelAllowedOnNode(nodeId, modelId) {
+      return Boolean(statements.getEnabledNodeModel.get(nodeId, modelId));
+    },
+    addNodeModel(nodeId, { modelId, modelName }) {
+      const timestamp = now();
+      statements.insertNodeModel.run(randomUUID(), nodeId, modelId, modelName || modelId, timestamp, timestamp);
+      return statements.listNodeModels.all(nodeId);
+    },
+    setNodeModelEnabled(nodeId, rowId, enabled) {
+      return statements.setNodeModelEnabled.run(enabled ? 1 : 0, now(), rowId, nodeId).changes > 0;
+    },
+    // A node must always be able to serve at least one model, so the last
+    // remaining row (enabled or not) can never be removed -- the operator must
+    // delete the whole node instead, the same way a node can't be left with zero
+    // client keys but can certainly be deleted outright.
+    deleteNodeModel(nodeId, rowId) {
+      const row = statements.getNodeModelById.get(rowId, nodeId);
+      if (!row) return { ok: false, reason: "not_found" };
+      const remaining = statements.listNodeModels.all(nodeId).filter((model) => model.id !== rowId);
+      if (remaining.length === 0) return { ok: false, reason: "last_model" };
+      statements.deleteNodeModel.run(rowId, nodeId);
+      return { ok: true };
+    },
     getNode: (id) => statements.getNode.get(id) || null,
     getNodeForProxy(id) {
       const node = statements.getNodeForProxy.get(id);

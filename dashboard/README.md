@@ -55,7 +55,7 @@ https://richard-swiftlm-origin-7165.zeabur.app/v1
 
 第一台機器由 `UPSTREAM_BASE_URL`、`MODEL_ID` 與 `DEFAULT_NODE_*` 自動建立；舊有對話、Key 與 request history 會安全地遷移到這個預設節點。
 
-之後在 Dashboard 的「機器」加入其他 SwiftLM、vLLM 或任何 OpenAI 相容 Origin。每台機器目前代表一個活躍的模型服務，因此會有一個模型 ID；若同一部實體 Mac 要同時提供不同模型，請將每個獨立 service 以不同 Origin 登記為不同節點。
+之後在 Dashboard 的「機器」加入其他 SwiftLM、vLLM 或任何 OpenAI 相容 Origin。一台機器對應一個 `origin_base_url`（一個推理 process、一個 port），但可以在同一個節點卡片下用「+ 新增模型」註冊多個模型 ID——適合 vLLM 新版、Ollama、LM Studio 這類本身就能用 `model` 欄位切換模型的 backend。若同一部實體主機是用兩個不同 port 各跑一個獨立的推理 process，仍然要以不同 Origin 登記成兩個節點，各自發自己的 client key；細節見 [../docs/inference-nodes.md](../docs/inference-nodes.md)。
 
 新增節點時需要填入該服務的 `/v1` URL、inference backend（`swiftlm` / `vllm` / `llamacpp` / `generic`）與驗證方式。「偵測 backend 與模型」會以一次 `/models` 請求判斷 backend 並帶出該節點已提供的模型。
 

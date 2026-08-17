@@ -2,7 +2,7 @@
 
 Dashboard 對 client 永遠只提供一組 OpenAI-compatible `/v1` API。底層節點可以是不同硬體與不同 inference backend，client 不需要知道差別。
 
-這份文件說明 Phase 1（vLLM compatibility）、Phase 2（Node Agent）與 Phase 3（Secure enrollment）已經完成的部分，以及仍未實作的部分。
+這份文件說明 Phase 1（vLLM compatibility）、Phase 2（Node Agent）、Phase 3（Secure enrollment）與 Phase 4 的一部分（多模型節點）已經完成的部分，以及仍未實作的部分。
 
 ## 分層
 
@@ -43,7 +43,7 @@ Inference runtime
 | `auth_header` | `api_key_header` 時使用的 header 名稱，預設 `X-API-Key` |
 | `upstream_api_key` | 憑證，AES-256-GCM 加密保存；`auth_type = none` 時為 `NULL` |
 | `capabilities` | JSON；未設定時採用該 provider 的預設能力 |
-| `model_id` / `model_name` | 目前仍是 1 Node = 1 model，多模型留待 Phase 4 的 `node_models` |
+| `model_id` / `model_name` | 節點的預設模型（新對話沒有指定模型時的目標），實際可用模型集合見下方 `node_models` |
 
 既有資料庫升級後，所有舊節點都會拿到 `provider = swiftlm`、`protocol = openai`、`auth_type = bearer`，行為與升級前完全相同。
 
@@ -89,6 +89,26 @@ vllm serve Qwen/Qwen3-32B --host 127.0.0.1 --port 8000
 backend 偵測依據：`x-mlx-request-id` header 代表 SwiftLM；`/v1/models` 出現 `owned_by: vllm` 或 `max_model_len` 代表 vLLM；`owned_by` 含 `llamacpp` 代表 llama.cpp；其餘視為 generic OpenAI-compatible。
 
 這是手動加入節點的路徑：管理員自己輸入網址與憑證，Dashboard 相信這個網址。下一節的 enrollment 流程解決的是另一個問題——讓節點自己證明身分，而不是單靠網路拓樸。
+
+## 一個節點提供多個模型
+
+`node_models` 表記錄一個節點可以服務哪些模型：
+
+| 欄位 | 說明 |
+| --- | --- |
+| `node_id` / `model_id` | 複合 UNIQUE，同一個模型不能在同一節點重複註冊 |
+| `model_name` | 顯示名稱 |
+| `enabled` | 停用後這個模型立即對 client 不可見，但仍保留在清單裡（跟停用整台機器是同一種可逆動作） |
+
+**範圍界定**：這裡處理的是「一個 endpoint 原生支援多個模型」的情況——vLLM 新版、Ollama、LM Studio 這類 backend 本身就能用 request body 的 `model` 欄位在多個模型間切換，一個 `origin_base_url` 就能服務全部。**不是**「同一個 node 橫跨兩個不同 port/兩個獨立 process」。後者每個 port 都是獨立的推理進程，如果透過 enrollment 使用 node-agent，也會是獨立的 node-agent 身分（`node_secret` 是綁在一個監聽 port 上的），因此仍然要註冊成兩個獨立的 node、發兩把不同的 client key——這點沒有改變，`node_models` 不會、也不應該讓兩個 port 共用一個 node 身分。
+
+行為：
+
+- 建立節點時自動把它自己的 `model_id`/`model_name` 註冊進 `node_models`；這是唯一保證每個節點至少有一個可用模型的地方。
+- 在「機器」頁面每張節點卡片下方可以看到目前註冊的模型（chip 形式），「+ 新增模型」可以加入同一個 endpoint 支援的其他模型 ID；每個 chip 可以個別停用或移除。
+- 節點至少要保留一個模型；移除最後一個會被拒絕（後端 409、前端也不會顯示移除按鈕），要整個下線就直接刪除節點。
+- Client 端 `/v1/models` 回傳的是這個節點目前啟用的模型清單，`/v1/chat/completions` 的 `model` 欄位只要在這個清單裡就會被原樣轉送給 backend——不會像 Phase 1 時那樣被硬改寫成節點的預設模型。一把 client key 綁定的是節點，不是單一模型，因此同一把 key 現在可以呼叫節點上任何一個已啟用的模型。
+- Dashboard 網頁聊天的「新對話」預設用節點的主要模型，但可以在送出第一則訊息前用模型下拉選單換成節點上的其他模型；對話一旦有訊息就會固定使用當時選的模型（跟固定 node 是同一個機制）。
 
 ## 三種憑證通道
 
@@ -148,4 +168,6 @@ Node 一旦 enrollment 完成，`auth_type` 預設為 `none`：Gateway-Identity 
 - **Node-initiated outbound tunnel**：目前仍是「Dashboard 主動連到 node.origin_base_url」，enrollment 也要求節點在加入當下就可被 Dashboard 連到。issue 提出的「節點主動建立 outbound tunnel」尚未實作。
 - **node_secret 輪替**：沒有 rotation endpoint；要更換就是撤銷舊節點、重新 enrollment。
 - **非 SwiftLM 的 node agent backend proxy**：如上一節所述，`nodeAgent.mjs` 本身與 backend 無關，但目前只有 `mlx-gateway` 實際串接了它；vLLM/llama.cpp 要用同樣的 enrollment/簽章機制，需要一個新的、比較薄的 proxy 前綴（不必是完整的 `mlx-gateway` queue 邏輯）。
-- **Phase 4 — multi-model / routing**：`node_models`、API key 的 node/model 權限與 capability-aware routing。目前仍是 1 Node = 1 model。
+- **同一個 node 橫跨多個 port**：`node_models` 只解決「一個 endpoint 原生支援多模型」；同一台主機上兩個獨立的推理 process（兩個 port）仍然要註冊成兩個 node、發兩把不同的 client key，見上一節的範圍界定。
+- **API key 的 node/model 權限矩陣**：目前一把 key 綁一個 node，可以用該 node 所有已啟用的模型；issue 提出的 `allowed_nodes` / `allowed_models` 更細緻的權限矩陣（例如同一把 key 跨多個 node，或限制只能用某個 node 的部分模型）還沒做。
+- **Capability-aware routing / scheduler**：目前 client 送出的 `model` 只是「在這個 node 上找不找得到這個 model_id」的靜態檢查，沒有依 capability（例如自動挑一個目前有空的節點）做動態路由。

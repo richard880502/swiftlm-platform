@@ -291,25 +291,28 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
       status = upstream.response.status;
       responsePreview = upstream.text;
       if (!upstream.response.ok) return res.status(status).json(upstream.data);
-      // Clients see the model this key is allowed to use, never the backend's own
-      // catalogue, so the answer is identical whatever runtime serves the node.
+      // Clients see the models this key is allowed to use, never the backend's own
+      // catalogue -- a node registered with two models lists both even if the
+      // backend itself happens to expose more.
       return res.json({
         object: "list",
-        data: [{
-          id: node.model_id,
-          object: "model",
-          created: 0,
-          owned_by: node.provider || "swiftlm",
-        }],
+        data: store.listNodeModels(node.id)
+          .filter((model) => model.enabled)
+          .map((model) => ({
+            id: model.model_id,
+            object: "model",
+            created: 0,
+            owned_by: node.provider || "swiftlm",
+          })),
       });
     }
 
-    if (route === "/chat/completions" && body?.model && body.model !== node.model_id) {
+    if (route === "/chat/completions" && body?.model && !store.isModelAllowedOnNode(node.id, body.model)) {
       status = 400;
       responsePreview = `Model is not available on ${node.name}`;
       return res.status(400).json({
         error: {
-          message: `This API key is restricted to ${node.model_id} on ${node.name}`,
+          message: `This API key is restricted to models registered on ${node.name}`,
           type: "invalid_request_error",
           code: "model_not_available",
         },
@@ -317,8 +320,12 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
     }
 
     const isChat = route === "/chat/completions";
+    // The client's requested model is forwarded as-is (defaulting to the node's
+    // primary model only when omitted) -- a node can serve more than one model,
+    // so silently overwriting whatever the client asked for would route every
+    // request to the wrong one.
     const preparedBody = isChat
-      ? prepareRequestBody(node, { ...body, model: node.model_id }, { stream })
+      ? prepareRequestBody(node, { ...body, model: body?.model || node.model_id }, { stream })
       : body;
     const upstream = await fetch(upstreamUrl(node, route), {
       method: req.method,

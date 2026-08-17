@@ -10,6 +10,7 @@ const state = {
   generationPollTimer: null,
   statusPollTimer: null,
   editingNodeId: null,
+  addingModelNodeId: null,
   stopping: false,
 };
 
@@ -200,13 +201,22 @@ function renderNodeOptions() {
   renderModelOptions(selectedId);
 }
 
+function nodeModels(node) {
+  const models = (node?.models || []).filter((model) => model.enabled);
+  // A node written before per-node model lists existed, or one whose models API
+  // call hasn't resolved yet, still has its own primary model to fall back to.
+  return models.length ? models : node ? [{ model_id: node.model_id, model_name: node.model_name }] : [];
+}
+
 function renderModelOptions(nodeId = elements.conversationNode.value) {
   const node = state.nodes.find((item) => item.id === nodeId);
-  const value = node?.model_id || "";
-  elements.conversationModel.innerHTML = node
-    ? `<option value="${escapeHtml(value)}">${escapeHtml(node.model_name)}</option>`
-    : "";
-  elements.conversationModel.value = state.current?.model_id === value ? value : value;
+  const models = nodeModels(node);
+  const preferred = state.current?.node_id === nodeId ? state.current?.model_id : null;
+  const value = models.some((model) => model.model_id === preferred) ? preferred : models[0]?.model_id || "";
+  elements.conversationModel.innerHTML = models
+    .map((model) => `<option value="${escapeHtml(model.model_id)}">${escapeHtml(model.model_name)}</option>`)
+    .join("");
+  elements.conversationModel.value = value;
 }
 
 function updateNodeStatus() {
@@ -240,7 +250,7 @@ async function loadNodes() {
     state.nodes = result.data || [];
     renderNodeOptions();
     updateNodeStatus();
-    if (state.currentView === "nodes" && !state.editingNodeId) renderNodes();
+    if (state.currentView === "nodes" && !state.editingNodeId && !state.addingModelNodeId) renderNodes();
   } catch {
     state.nodes = [];
     updateNodeStatus();
@@ -651,6 +661,26 @@ function syncAuthFields() {
   elements.nodeAuthHeader.disabled = authType !== "api_key_header";
 }
 
+function renderModelChips(node) {
+  const models = node.models || [];
+  return `
+    <div class="node-models">
+      ${models.map((model) => `
+        <span class="model-chip ${model.enabled ? "" : "disabled"}">
+          <span>${escapeHtml(model.model_name)}</span>
+          <code>${escapeHtml(model.model_id)}</code>
+          <button type="button" data-toggle-model="${escapeHtml(model.id)}" data-model-node="${escapeHtml(node.id)}"
+            data-model-enabled="${model.enabled ? "0" : "1"}" title="${model.enabled ? "停用這個模型" : "啟用這個模型"}">
+            ${model.enabled ? "●" : "○"}
+          </button>
+          ${models.length > 1 ? `<button type="button" data-remove-model="${escapeHtml(model.id)}" data-model-node="${escapeHtml(node.id)}" title="移除這個模型">×</button>` : ""}
+        </span>
+      `).join("")}
+      <button type="button" class="toolbar-button subtle-button" data-add-model="${escapeHtml(node.id)}">+ 新增模型</button>
+    </div>
+  `;
+}
+
 function renderNodes() {
   const nodes = state.nodes || [];
   const online = nodes.filter((node) => node.status?.state === "online").length;
@@ -664,6 +694,7 @@ function renderNodes() {
     const latency = node.status?.latency_ms == null ? "—" : `${formatNumber(node.status.latency_ms)} ms`;
     const canDelete = !node.is_default;
     const editingKey = state.editingNodeId === node.id;
+    const addingModel = state.addingModelNodeId === node.id;
     return `
       <article class="node-row ${node.enabled ? "" : "disabled"}">
         <span class="node-indicator ${escapeHtml(node.status?.state || "offline")}" aria-hidden="true"></span>
@@ -673,7 +704,7 @@ function renderNodes() {
             <span class="node-provider-tag">${escapeHtml(PROVIDER_LABELS[node.provider] || node.provider || "swiftlm")}</span>
             <span class="state-label ${node.status?.state === "online" ? "active" : ""}">${stateName}</span>
           </div>
-          <p>${escapeHtml(node.model_name)} · ${escapeHtml(node.model_id)}</p>
+          ${renderModelChips(node)}
           <small>最後檢查 ${formatDate(node.status?.checked_at)} · ${latency} · ${escapeHtml(AUTH_TYPE_LABELS[node.auth_type] || node.auth_type || "bearer")}</small>
         </div>
         <div class="node-actions">
@@ -696,6 +727,14 @@ function renderNodes() {
             <label>Header 名稱<input name="auth_header" placeholder="X-API-Key" maxlength="63" value="${escapeHtml(node.auth_header || "")}" /></label>
             <button class="primary" type="submit">儲存</button>
             <button class="toolbar-button" type="button" data-cancel-node-key>取消</button>
+          </form>
+        ` : ""}
+        ${addingModel ? `
+          <form class="node-key-update" data-node-model-form="${escapeHtml(node.id)}">
+            <label>模型 ID<input name="model_id" placeholder="例如 Qwen/Qwen3-14B" maxlength="240" required /></label>
+            <label>顯示名稱<input name="model_name" placeholder="選填，預設同模型 ID" maxlength="120" /></label>
+            <button class="primary" type="submit">新增</button>
+            <button class="toolbar-button" type="button" data-cancel-model>取消</button>
           </form>
         ` : ""}
       </article>
@@ -771,6 +810,62 @@ function renderNodes() {
       }
     });
   });
+  elements.nodeList.querySelectorAll("[data-add-model]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.addingModelNodeId = button.dataset.addModel;
+      renderNodes();
+      elements.nodeList.querySelector("[data-node-model-form] input")?.focus();
+    });
+  });
+  elements.nodeList.querySelectorAll("[data-cancel-model]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.addingModelNodeId = null;
+      renderNodes();
+    });
+  });
+  elements.nodeList.querySelectorAll("[data-node-model-form]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(form);
+      try {
+        await request(`/api/nodes/${form.dataset.nodeModelForm}/models`, {
+          method: "POST",
+          body: JSON.stringify({ model_id: data.get("model_id"), model_name: data.get("model_name") }),
+        });
+        state.addingModelNodeId = null;
+        await loadNodes();
+        showToast("模型已新增");
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+  elements.nodeList.querySelectorAll("[data-toggle-model]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await request(`/api/nodes/${button.dataset.modelNode}/models/${button.dataset.toggleModel}/enabled`, {
+          method: "PATCH", body: JSON.stringify({ enabled: button.dataset.modelEnabled === "1" }),
+        });
+        await loadNodes();
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+  elements.nodeList.querySelectorAll("[data-remove-model]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("確定從這台機器移除這個模型？")) return;
+      try {
+        await request(`/api/nodes/${button.dataset.modelNode}/models/${button.dataset.removeModel}`, {
+          method: "DELETE",
+        });
+        await loadNodes();
+        showToast("模型已移除");
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
 }
 
 const ENROLLMENT_STATE_LABELS = { pending: "待使用", used: "已使用", expired: "已過期" };
@@ -837,7 +932,7 @@ async function updateConversationTarget() {
   try {
     state.current = await request(`/api/conversations/${state.current.id}/target`, {
       method: "PATCH",
-      body: JSON.stringify({ node_id: node.id, model_id: node.model_id }),
+      body: JSON.stringify({ node_id: node.id, model_id: elements.conversationModel.value }),
     });
     renderNodeOptions();
     updateConversationHeader();

@@ -464,6 +464,14 @@ input { padding: 12px 13px; }
 .node-form-actions .toolbar-button { height: 37px; padding: 7px 12px; white-space: nowrap; }
 .node-key-update select { min-width: 0; height: 35px; font-size: 11px; }
 .node-provider-tag { padding: 2px 7px; color: var(--muted); font-size: 9px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; border: 1px solid var(--line); border-radius: 999px; }
+.node-models { display: flex; flex-wrap: wrap; gap: 6px; margin: 7px 0 0; }
+.model-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 5px 4px 9px; font-size: 10px; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,255,255,.035); }
+.model-chip.disabled { opacity: .5; }
+.model-chip span { color: var(--text); font-weight: 600; }
+.model-chip code { padding: 0; color: var(--muted); font-size: 9px; background: none; }
+.model-chip button { display: grid; place-items: center; width: 17px; height: 17px; padding: 0; color: var(--muted); font-size: 11px; line-height: 1; border: 0; border-radius: 50%; background: rgba(255,255,255,.06); cursor: pointer; }
+.model-chip button:hover { color: var(--text); background: rgba(255,255,255,.12); }
+.subtle-button { padding: 4px 10px; font-size: 10px; }
 
 .toast { position: fixed; z-index: 30; left: 50%; bottom: 27px; transform: translateX(-50%); padding: 9px 14px; color: white; font-size: 11px; font-weight: 600; border: 1px solid rgba(255,255,255,.2); border-radius: 999px; background: rgba(52,54,61,.9); box-shadow: 0 12px 35px rgba(0,0,0,.36), inset 0 1px rgba(255,255,255,.12); backdrop-filter: blur(20px); }
 
