@@ -110,6 +110,22 @@ backend 偵測依據：`x-mlx-request-id` header 代表 SwiftLM；`/v1/models` �
 - Client 端 `/v1/models` 回傳的是這個節點目前啟用的模型清單，`/v1/chat/completions` 的 `model` 欄位只要在這個清單裡就會被原樣轉送給 backend——不會像 Phase 1 時那樣被硬改寫成節點的預設模型。一把 client key 綁定的是節點，不是單一模型，因此同一把 key 現在可以呼叫節點上任何一個已啟用的模型。
 - Dashboard 網頁聊天的「新對話」預設用節點的主要模型，但可以在送出第一則訊息前用模型下拉選單換成節點上的其他模型；對話一旦有訊息就會固定使用當時選的模型（跟固定 node 是同一個機制）。
 
+## 目前的安全邊界方向：優先用 Tailscale，Enrollment 暫緩
+
+下面兩節（三種憑證通道、Enrollment 流程）描述的 HMAC enrollment 機制**已經實作、程式碼保留**，但目前決定**不是新節點的建議路徑**，後續也暫緩繼續投資（例如原本規劃的「vLLM 專用 node-agent」）。
+
+原因：很多節點（尤其 vLLM）不一定能、或不一定想在 backend 本機額外安裝東西。與其為每種 backend 各寫一個 node-agent 來做 request 層簽章驗證，改用 Tailscale（或其他 mesh VPN）本身的裝置級 ACL 更省事、也更扎實——它是成熟系統做的網路層身分驗證（WireGuard 金鑰 + ACL），擋在 TCP 連線建立之前，而不是進來之後才驗證 request。只要節點所在機器（或機器上專門負責轉發的 VM）本身加入 tailnet，把 `origin_base_url` 指到 Tailscale 配發的位址，ACL 限制只有 Dashboard 能連進來，`auth_type` 就可以安心設 `none`，不需要 enrollment、不需要 node_secret、不需要 node-agent。
+
+兩條路徑不衝突、可以並存，依節點情況選一種：
+
+| | Tailscale ACL（建議） | Enrollment（HMAC，見下） |
+| --- | --- | --- |
+| 驗證發生在哪一層 | 網路層（TCP 連線建立前） | Request 層（HTTP header 簽章） |
+| Backend 主機需要裝什麼 | 只要 tailnet 裡有一個節點（機器本身或機器上的 VM）| 需要一個懂 HTTP 的 node-agent（目前只有 `mlx-gateway`/SwiftLM 有） |
+| 目前狀態 | 建議方向，程式碼不需要改動（`origin_base_url` 本來就是透明的） | 已完成、保留給已經在用 `mlx-gateway` 的 SwiftLM 節點 |
+
+具體部署步驟見 [用 Tailscale 部署新節點](tailscale-node-deployment.md)。
+
 ## 三種憑證通道
 
 平台上同時存在三種彼此獨立的憑證，任何一種外洩都不能讓攻擊者取得其他兩種的權限：
@@ -167,7 +183,7 @@ Node 一旦 enrollment 完成，`auth_type` 預設為 `none`：Gateway-Identity 
 - **Ed25519 / mTLS 升級**：目前 Node Identity 與 Gateway Identity 都是 issue 裡列的 HMAC MVP 路徑，不是 Ed25519。升級只需要替換 `sign`/`verify` 兩個函式，呼叫端（enrollment、heartbeat、proxy 簽章）不需要改。
 - **Node-initiated outbound tunnel**：目前仍是「Dashboard 主動連到 node.origin_base_url」，enrollment 也要求節點在加入當下就可被 Dashboard 連到。issue 提出的「節點主動建立 outbound tunnel」尚未實作。
 - **node_secret 輪替**：沒有 rotation endpoint；要更換就是撤銷舊節點、重新 enrollment。
-- **非 SwiftLM 的 node agent backend proxy**：如上一節所述，`nodeAgent.mjs` 本身與 backend 無關，但目前只有 `mlx-gateway` 實際串接了它；vLLM/llama.cpp 要用同樣的 enrollment/簽章機制，需要一個新的、比較薄的 proxy 前綴（不必是完整的 `mlx-gateway` queue 邏輯）。
+- **非 SwiftLM 的 node agent backend proxy**：`nodeAgent.mjs` 本身與 backend 無關，理論上可以重用給 vLLM/llama.cpp，但目前**暫緩投資這個方向**——新節點優先用 Tailscale ACL（見上方「目前的安全邊界方向」），不再規劃另外做一個 vLLM 專用 node-agent。
 - **同一個 node 橫跨多個 port**：`node_models` 只解決「一個 endpoint 原生支援多模型」；同一台主機上兩個獨立的推理 process（兩個 port）仍然要註冊成兩個 node、發兩把不同的 client key，見上一節的範圍界定。
 - **API key 的 node/model 權限矩陣**：目前一把 key 綁一個 node，可以用該 node 所有已啟用的模型；issue 提出的 `allowed_nodes` / `allowed_models` 更細緻的權限矩陣（例如同一把 key 跨多個 node，或限制只能用某個 node 的部分模型）還沒做。
 - **Capability-aware routing / scheduler**：目前 client 送出的 `model` 只是「在這個 node 上找不找得到這個 model_id」的靜態檢查，沒有依 capability（例如自動挑一個目前有空的節點）做動態路由。
