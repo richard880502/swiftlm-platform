@@ -681,21 +681,14 @@ function renderModelChips(node) {
   `;
 }
 
-function renderNodes() {
-  const nodes = state.nodes || [];
-  const online = nodes.filter((node) => node.status?.state === "online").length;
-  const available = nodes.filter((node) => node.enabled).length;
-  elements.nodeCount.textContent = formatNumber(nodes.length);
-  elements.onlineNodeCount.textContent = `${formatNumber(online)} / ${formatNumber(nodes.length)}`;
-  elements.availableModelCount.textContent = formatNumber(available);
-  elements.nodeList.innerHTML = nodes.length ? nodes.map((node) => {
-    const stateName = node.status?.state === "online" ? "在線"
-      : node.status?.state === "disabled" ? "已停用" : "離線";
-    const latency = node.status?.latency_ms == null ? "—" : `${formatNumber(node.status.latency_ms)} ms`;
-    const canDelete = !node.is_default;
-    const editingKey = state.editingNodeId === node.id;
-    const addingModel = state.addingModelNodeId === node.id;
-    return `
+function renderNodeRow(node) {
+  const stateName = node.status?.state === "online" ? "在線"
+    : node.status?.state === "disabled" ? "已停用" : "離線";
+  const latency = node.status?.latency_ms == null ? "—" : `${formatNumber(node.status.latency_ms)} ms`;
+  const canDelete = !node.is_default;
+  const editingKey = state.editingNodeId === node.id;
+  const addingModel = state.addingModelNodeId === node.id;
+  return `
       <article class="node-row ${node.enabled ? "" : "disabled"}">
         <span class="node-indicator ${escapeHtml(node.status?.state || "offline")}" aria-hidden="true"></span>
         <div class="node-main">
@@ -739,6 +732,27 @@ function renderNodes() {
         ` : ""}
       </article>
     `;
+}
+
+function renderNodes() {
+  const nodes = state.nodes || [];
+  const online = nodes.filter((node) => node.status?.state === "online").length;
+  const available = nodes.filter((node) => node.enabled).length;
+  elements.nodeCount.textContent = formatNumber(nodes.length);
+  elements.onlineNodeCount.textContent = `${formatNumber(online)} / ${formatNumber(nodes.length)}`;
+  elements.availableModelCount.textContent = formatNumber(available);
+  // One malformed node must never blank the whole list: without this, an
+  // exception thrown while building any single row aborts the .map() call
+  // entirely, and since the summary counts above are already written by then,
+  // the counts look right while the list itself silently keeps its last
+  // successful (stale) content -- a confusing, hard-to-notice failure mode.
+  elements.nodeList.innerHTML = nodes.length ? nodes.map((node) => {
+    try {
+      return renderNodeRow(node);
+    } catch (error) {
+      console.error("Failed to render node row", node?.id, error);
+      return `<article class="node-row"><div class="node-main"><strong>${escapeHtml(node?.name || node?.id || "unknown")}</strong><p>這台機器目前無法顯示（詳情見主控台）。</p></div></article>`;
+    }
   }).join("") : '<div class="empty-list"><strong>尚未加入機器</strong><span>加入已透過 Wonder Mesh 發布的 SwiftLM Origin。</span></div>';
 
   elements.nodeList.querySelectorAll("[data-toggle-node]").forEach((button) => {
