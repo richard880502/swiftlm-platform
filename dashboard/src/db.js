@@ -102,6 +102,13 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
   // to a populated table, so legacy records are backfilled below after the default node exists.
   addColumnIfMissing(db, "api_keys", "node_id", "node_id TEXT REFERENCES nodes(id) ON DELETE RESTRICT");
   addColumnIfMissing(db, "nodes", "upstream_api_key", "upstream_api_key TEXT");
+  // Nodes started out as SwiftLM-only, so every backend descriptor defaults to the
+  // behaviour existing rows already relied on: SwiftLM over OpenAI with a bearer key.
+  addColumnIfMissing(db, "nodes", "provider", "provider TEXT NOT NULL DEFAULT 'swiftlm'");
+  addColumnIfMissing(db, "nodes", "protocol", "protocol TEXT NOT NULL DEFAULT 'openai'");
+  addColumnIfMissing(db, "nodes", "auth_type", "auth_type TEXT NOT NULL DEFAULT 'bearer'");
+  addColumnIfMissing(db, "nodes", "auth_header", "auth_header TEXT");
+  addColumnIfMissing(db, "nodes", "capabilities", "capabilities TEXT");
   addColumnIfMissing(db, "conversations", "node_id", "node_id TEXT REFERENCES nodes(id) ON DELETE RESTRICT");
   addColumnIfMissing(db, "conversations", "model_id", "model_id TEXT");
   addColumnIfMissing(db, "api_requests", "node_id", "node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL");
@@ -144,27 +151,31 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
   db.prepare("UPDATE conversations SET model_id = ? WHERE model_id IS NULL").run(defaultNode.modelId);
   db.prepare("UPDATE api_requests SET node_id = ? WHERE node_id IS NULL").run(defaultNode.id);
 
+  // Every node read shares one column list so a new backend descriptor field cannot
+  // be exposed on one code path and silently missing on another.
+  const NODE_COLUMNS = `id, name, origin_base_url, model_id, model_name,
+      provider, protocol, auth_type, auth_header, capabilities,
+      enabled, created_at, updated_at`;
+
   const statements = {
     insertNode: db.prepare(`
-      INSERT INTO nodes(id, name, origin_base_url, model_id, model_name, upstream_api_key, enabled, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+      INSERT INTO nodes(
+        id, name, origin_base_url, model_id, model_name,
+        provider, protocol, auth_type, auth_header, capabilities,
+        upstream_api_key, enabled, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
     `),
-    listNodes: db.prepare(`
-      SELECT id, name, origin_base_url, model_id, model_name, enabled, created_at, updated_at
-      FROM nodes ORDER BY created_at ASC
-    `),
-    getNode: db.prepare(`
-      SELECT id, name, origin_base_url, model_id, model_name, enabled, created_at, updated_at
-      FROM nodes WHERE id = ?
-    `),
-    getNodeForProxy: db.prepare(`
-      SELECT id, name, origin_base_url, model_id, model_name, upstream_api_key, enabled, created_at, updated_at
-      FROM nodes WHERE id = ?
-    `),
+    listNodes: db.prepare(`SELECT ${NODE_COLUMNS} FROM nodes ORDER BY created_at ASC`),
+    getNode: db.prepare(`SELECT ${NODE_COLUMNS} FROM nodes WHERE id = ?`),
+    getNodeForProxy: db.prepare(`SELECT ${NODE_COLUMNS}, upstream_api_key FROM nodes WHERE id = ?`),
     setNodeEnabled: db.prepare("UPDATE nodes SET enabled = ?, updated_at = ? WHERE id = ?"),
     updateNodeUpstreamKey: db.prepare(
       "UPDATE nodes SET upstream_api_key = ?, updated_at = ? WHERE id = ?",
     ),
+    updateNodeAuth: db.prepare(`
+      UPDATE nodes SET auth_type = ?, auth_header = ?, upstream_api_key = ?, updated_at = ?
+      WHERE id = ?
+    `),
     nodeUsage: db.prepare(`
       SELECT
         (SELECT COUNT(*) FROM api_keys WHERE node_id = ?) AS api_key_count,
@@ -182,6 +193,7 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
     getKeyByDigest: db.prepare(`
       SELECT k.id, k.name, k.prefix, k.node_id, k.created_at, k.last_used_at, k.revoked_at,
              n.name AS node_name, n.origin_base_url, n.model_id, n.model_name, n.upstream_api_key,
+             n.provider, n.protocol, n.auth_type, n.auth_header, n.capabilities,
              n.enabled AS node_enabled
       FROM api_keys k JOIN nodes n ON n.id = k.node_id WHERE k.digest = ?
     `),
@@ -245,10 +257,24 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
 
   return {
     close: () => db.close(),
-    createNode({ id = randomUUID(), name, originBaseUrl, modelId, modelName, upstreamApiKey }) {
+    createNode({
+      id = randomUUID(),
+      name,
+      originBaseUrl,
+      modelId,
+      modelName,
+      upstreamApiKey,
+      provider = "swiftlm",
+      protocol = "openai",
+      authType = "bearer",
+      authHeader = null,
+      capabilities = null,
+    }) {
       const createdAt = now();
       statements.insertNode.run(
         id, name, originBaseUrl, modelId, modelName,
+        provider, protocol, authType, authHeader || null,
+        capabilities ? JSON.stringify(capabilities) : null,
         encryptNodeKey(upstreamApiKey, nodeKey), createdAt, createdAt,
       );
       return statements.getNode.get(id);
@@ -265,6 +291,17 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
     updateNodeUpstreamKey(id, upstreamApiKey) {
       return statements.updateNodeUpstreamKey.run(
         encryptNodeKey(upstreamApiKey, nodeKey), now(), id,
+      ).changes > 0;
+    },
+    // A credential is only one of several strategies, so changing it and changing the
+    // strategy is a single operation: switching a node to "none" must also clear the key.
+    updateNodeAuth(id, { authType, authHeader = null, upstreamApiKey = null }) {
+      return statements.updateNodeAuth.run(
+        authType,
+        authHeader || null,
+        authType === "none" ? null : encryptNodeKey(upstreamApiKey, nodeKey),
+        now(),
+        id,
       ).changes > 0;
     },
     getNodeUsage(id) {

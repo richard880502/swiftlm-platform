@@ -159,5 +159,53 @@ test("an existing single-node database is migrated to the default node", () => {
   assert.equal(store.authenticateApiKey("legacy-digest").node_id, defaultNode.id);
   assert.equal(store.getConversation("legacy-conversation").node_id, defaultNode.id);
   assert.equal(store.listRequests()[0].node_id, defaultNode.id);
+  // A database written before backends were describable must keep behaving exactly
+  // as it did: SwiftLM over the OpenAI protocol with a bearer credential.
+  const migrated = store.getNode(defaultNode.id);
+  assert.equal(migrated.provider, "swiftlm");
+  assert.equal(migrated.protocol, "openai");
+  assert.equal(migrated.auth_type, "bearer");
+  assert.equal(migrated.auth_header, null);
+  assert.equal(store.authenticateApiKey("legacy-digest").provider, "swiftlm");
+  store.close();
+});
+
+test("a keyless vLLM node is storable and keeps no credential", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "swiftlm-dashboard-vllm-test-"));
+  const store = createStore(path.join(directory, "test.sqlite"), { defaultNode, nodeSecret });
+  const node = store.createNode({
+    id: "gpu-01",
+    name: "GPU 01",
+    originBaseUrl: "http://10.0.0.4:8000/v1",
+    modelId: "Qwen/Qwen3-32B",
+    modelName: "Qwen3 32B",
+    provider: "vllm",
+    protocol: "openai",
+    authType: "none",
+    upstreamApiKey: null,
+  });
+
+  assert.equal(node.provider, "vllm");
+  assert.equal(node.auth_type, "none");
+  assert.equal(store.getNodeForProxy("gpu-01").upstream_api_key, null);
+  store.createApiKey({
+    id: "key-vllm", name: "GPU Key", prefix: "sk-mlx-gpu…", digest: "digest-vllm", nodeId: "gpu-01",
+  });
+  // The proxy reads the backend descriptor straight off the authenticated key.
+  const authenticated = store.authenticateApiKey("digest-vllm");
+  assert.equal(authenticated.provider, "vllm");
+  assert.equal(authenticated.auth_type, "none");
+  assert.equal(authenticated.upstream_api_key, null);
+
+  // Switching an existing node to a header credential must not leave the old
+  // strategy behind, and switching back to "none" must clear the credential.
+  assert.equal(store.updateNodeAuth("gpu-01", {
+    authType: "api_key_header", authHeader: "X-Node-Key", upstreamApiKey: "node-secret",
+  }), true);
+  assert.equal(store.getNode("gpu-01").auth_type, "api_key_header");
+  assert.equal(store.getNode("gpu-01").auth_header, "X-Node-Key");
+  assert.equal(store.getNodeForProxy("gpu-01").upstream_api_key, "node-secret");
+  assert.equal(store.updateNodeAuth("gpu-01", { authType: "none" }), true);
+  assert.equal(store.getNodeForProxy("gpu-01").upstream_api_key, null);
   store.close();
 });

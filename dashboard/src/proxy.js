@@ -1,4 +1,13 @@
+import {
+  buildAuthHeaders,
+  prepareRequestBody,
+  providerHeaders,
+  readJsonMetrics,
+  readStreamEvent,
+} from "./providers.js";
+
 const PREVIEW_LIMIT = 12_000;
+const UPSTREAM_UNAVAILABLE = "Inference node unavailable";
 
 export function preview(value) {
   const text = typeof value === "string" ? value : JSON.stringify(value);
@@ -9,17 +18,90 @@ function upstreamUrl(node, path) {
   return `${node.origin_base_url}${path}`;
 }
 
-function upstreamApiKey(config, node) {
-  return node.upstream_api_key || config.upstreamApiKey;
+// The default node's credential lives in the server environment rather than the
+// database. It must never be lent to any other node: a third-party endpoint would
+// otherwise receive the SwiftLM master key.
+export function resolveCredential(config, node) {
+  const isDefaultNode = Boolean(config?.defaultNode?.id) && node?.id === config.defaultNode.id;
+  return {
+    authType: node?.auth_type || "bearer",
+    authHeader: node?.auth_header,
+    credential: node?.upstream_api_key || (isDefaultNode ? config.upstreamApiKey : null),
+  };
+}
+
+export function upstreamHeaders(config, node, { stream = false, json = false, inference = false } = {}) {
+  return {
+    ...buildAuthHeaders(resolveCredential(config, node)),
+    ...(inference ? providerHeaders(node, { stream }) : {}),
+    ...(json ? { "Content-Type": "application/json" } : {}),
+  };
+}
+
+// Metrics are normalized into one vocabulary across backends. A provider that
+// reports its own numbers always wins; otherwise the gateway falls back to what it
+// can observe from the stream itself, so a vLLM or llama.cpp request still shows
+// throughput instead of a blank row. Gateway-measured TTFT includes the network
+// round trip to the node, which is why a provider-reported value takes precedence.
+// queue_ms stays null unless the backend reports it, because the gateway cannot see
+// upstream queueing.
+export function createMetricsCollector() {
+  const startedAt = Date.now();
+  let firstTokenAt = null;
+  let reported = null;
+  let usage = null;
+
+  return {
+    markFirstToken() {
+      if (firstTokenAt == null) firstTokenAt = Date.now();
+    },
+    setReported(metrics) {
+      if (metrics) reported = metrics;
+    },
+    setUsage(value) {
+      if (value) usage = value;
+    },
+    get usage() {
+      return usage;
+    },
+    result() {
+      const promptTokens = reported?.prompt_tokens ?? usage?.prompt_tokens ?? null;
+      const completionTokens = reported?.completion_tokens ?? usage?.completion_tokens ?? null;
+      const decodeMs = firstTokenAt == null ? null : Math.max(Date.now() - firstTokenAt, 1);
+      const measured = completionTokens == null || decodeMs == null
+        ? null
+        : Number((completionTokens / (decodeMs / 1000)).toFixed(3));
+      return {
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        queue_ms: reported?.queue_ms ?? null,
+        ttft_ms: reported?.ttft_ms ?? (firstTokenAt == null ? null : firstTokenAt - startedAt),
+        throughput_tps: reported?.throughput_tps ?? measured,
+      };
+    },
+  };
+}
+
+function sseEventName(eventText) {
+  return eventText
+    .split("\n")
+    .find((line) => line.startsWith("event:"))
+    ?.slice(6)
+    .trim();
+}
+
+function sseData(eventText) {
+  return eventText
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart())
+    .join("\n");
 }
 
 export async function upstreamJson(config, node, path, body, { signal } = {}) {
   const response = await fetch(upstreamUrl(node, path), {
     method: body === undefined ? "GET" : "POST",
-    headers: {
-      Authorization: `Bearer ${upstreamApiKey(config, node)}`,
-      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-    },
+    headers: upstreamHeaders(config, node, { json: body !== undefined }),
     body: body === undefined ? undefined : JSON.stringify(body),
     signal,
   });
@@ -42,19 +124,13 @@ export async function streamDashboardChat({
     clientConnected = false;
   });
 
+  const metricsCollector = createMetricsCollector();
   const upstream = await fetch(upstreamUrl(node, "/chat/completions"), {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${upstreamApiKey(config, node)}`,
-      "Content-Type": "application/json",
-      "X-MLX-Include-Metrics": "1",
-    },
-    body: JSON.stringify({
-      ...requestBody,
-      stream: true,
-      // SwiftLM only sends usage in its final SSE chunk when explicitly requested.
-      stream_options: { ...requestBody.stream_options, include_usage: true },
-    }),
+    headers: upstreamHeaders(config, node, { stream: true, json: true, inference: true }),
+    body: JSON.stringify(
+      prepareRequestBody(node, { ...requestBody, stream: true }, { stream: true }),
+    ),
     signal,
   });
 
@@ -62,7 +138,7 @@ export async function streamDashboardChat({
     const text = await upstream.text();
     if (clientConnected) {
       response.status(upstream.status || 502).json({
-        error: { message: text || "SwiftLM upstream unavailable" },
+        error: { message: text || UPSTREAM_UNAVAILABLE },
       });
     }
     return;
@@ -80,8 +156,6 @@ export async function streamDashboardChat({
   const decoder = new TextDecoder();
   let buffer = "";
   let assistant = "";
-  let usage = null;
-  let metrics = null;
   let lastPersistedAssistant = "";
 
   const canWrite = () => clientConnected && !response.writableEnded && !response.destroyed;
@@ -91,36 +165,38 @@ export async function streamDashboardChat({
   const persistCompletion = async (completed, { cancelled = false } = {}) => {
     if (completionAttempted || (!assistant.trim() && !cancelled)) return null;
     completionAttempted = true;
-    return onComplete({ assistant, usage, metrics, completed, cancelled });
+    return onComplete({
+      assistant,
+      usage: metricsCollector.usage,
+      metrics: metricsCollector.result(),
+      completed,
+      cancelled,
+    });
   };
   const persistProgress = async () => {
     if (!onProgress || assistant === lastPersistedAssistant) return;
     lastPersistedAssistant = assistant;
-    await onProgress({ assistant, usage });
+    await onProgress({ assistant, usage: metricsCollector.usage });
   };
   const consumeEvent = async (eventText) => {
-    const eventName = eventText
-      .split("\n")
-      .find((line) => line.startsWith("event:"))
-      ?.slice(6)
-      .trim();
-    const data = eventText
-      .split("\n")
-      .filter((line) => line.startsWith("data:"))
-      .map((line) => line.slice(5).trimStart())
-      .join("\n");
+    const eventName = sseEventName(eventText);
+    const data = sseData(eventText);
     if (!data || data === "[DONE]") return;
+    const providerEvent = readStreamEvent(node, { eventName, data });
+    if (providerEvent.consumed) {
+      metricsCollector.setReported(providerEvent.metrics);
+      return;
+    }
     try {
       const chunk = JSON.parse(data);
-      if (eventName === "mlx-metrics") {
-        metrics = chunk;
-        return;
-      }
-      assistant += chunk.choices?.[0]?.delta?.content || "";
-      usage = chunk.usage || usage;
+      const delta = chunk.choices?.[0]?.delta?.content || "";
+      if (delta) metricsCollector.markFirstToken();
+      assistant += delta;
+      metricsCollector.setUsage(chunk.usage);
       emitData(JSON.stringify(chunk));
     } catch {
       emitData(JSON.stringify({ choices: [{ delta: { content: data } }] }));
+      metricsCollector.markFirstToken();
       assistant += data;
     }
     await persistProgress();
@@ -173,10 +249,10 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
   const started = Date.now();
   const route = req.path.replace(/^\/v1/, "") || "/";
   const body = req.method === "GET" ? undefined : req.body;
+  const stream = Boolean(body?.stream);
   let status = 502;
   let responsePreview = "";
-  let usage = null;
-  let metrics = null;
+  const metricsCollector = createMetricsCollector();
   const node = {
     id: apiKey.node_id,
     name: apiKey.node_name,
@@ -184,6 +260,10 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
     model_id: apiKey.model_id,
     model_name: apiKey.model_name,
     upstream_api_key: apiKey.upstream_api_key,
+    provider: apiKey.provider,
+    protocol: apiKey.protocol,
+    auth_type: apiKey.auth_type,
+    auth_header: apiKey.auth_header,
   };
 
   try {
@@ -192,13 +272,15 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
       status = upstream.response.status;
       responsePreview = upstream.text;
       if (!upstream.response.ok) return res.status(status).json(upstream.data);
+      // Clients see the model this key is allowed to use, never the backend's own
+      // catalogue, so the answer is identical whatever runtime serves the node.
       return res.json({
         object: "list",
         data: [{
           id: node.model_id,
           object: "model",
           created: 0,
-          owned_by: "local-swiftlm",
+          owned_by: node.provider || "swiftlm",
         }],
       });
     }
@@ -215,49 +297,47 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
       });
     }
 
+    const isChat = route === "/chat/completions";
     const upstream = await fetch(upstreamUrl(node, route), {
       method: req.method,
       headers: {
-        Authorization: `Bearer ${upstreamApiKey(config, node)}`,
-        "Content-Type": "application/json",
+        ...upstreamHeaders(config, node, { stream, json: true, inference: true }),
         Accept: req.headers.accept || "application/json",
-        "X-MLX-Include-Metrics": body?.stream ? "1" : "0",
       },
-      body: JSON.stringify(route === "/chat/completions" && body?.stream
-        ? {
-          ...body,
-          model: node.model_id,
-          stream_options: { ...body.stream_options, include_usage: true },
-        }
-        : route === "/chat/completions" ? { ...body, model: node.model_id } : body),
+      body: JSON.stringify(isChat
+        ? prepareRequestBody(node, { ...body, model: node.model_id }, { stream })
+        : body),
     });
     status = upstream.status;
     res.status(status);
     res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/json");
 
-    if (body?.stream && upstream.body) {
+    if (stream && upstream.body) {
       res.setHeader("Cache-Control", "no-cache, no-transform");
       const reader = upstream.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      const forwardEvent = (eventText) => {
+        const data = sseData(eventText);
+        const providerEvent = readStreamEvent(node, { eventName: sseEventName(eventText), data });
+        // Provider-specific metrics events are consumed here so a client only ever
+        // sees standard OpenAI chunks, whatever backend produced them.
+        if (providerEvent.consumed) {
+          metricsCollector.setReported(providerEvent.metrics);
+          return;
+        }
+        observeChunk(metricsCollector, data);
+        responsePreview = preview(responsePreview + eventText);
+        res.write(`${eventText}\n\n`);
+      };
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
         let boundary;
         while ((boundary = buffer.indexOf("\n\n")) >= 0) {
-          const eventText = buffer.slice(0, boundary);
+          forwardEvent(buffer.slice(0, boundary));
           buffer = buffer.slice(boundary + 2);
-          const eventName = eventText.split("\n")
-            .find((line) => line.startsWith("event:"))?.slice(6).trim();
-          const data = eventText.split("\n").filter((line) => line.startsWith("data:"))
-            .map((line) => line.slice(5).trimStart()).join("\n");
-          if (eventName === "mlx-metrics") {
-            try { metrics = JSON.parse(data); } catch { /* keep transparent streaming on malformed metrics */ }
-            continue;
-          }
-          responsePreview = preview(responsePreview + eventText);
-          res.write(`${eventText}\n\n`);
         }
       }
       buffer += decoder.decode();
@@ -273,7 +353,8 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
     responsePreview = preview(text);
     try {
       const parsed = JSON.parse(text);
-      usage = parsed.usage || null;
+      metricsCollector.setUsage(parsed.usage);
+      metricsCollector.setReported(readJsonMetrics(node, parsed));
       return res.json(parsed);
     } catch {
       return res.send(text);
@@ -284,7 +365,7 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
     if (!res.headersSent) {
       return res.status(502).json({
         error: {
-          message: "SwiftLM upstream unavailable",
+          message: UPSTREAM_UNAVAILABLE,
           type: "upstream_error",
           code: "upstream_unavailable",
         },
@@ -292,6 +373,7 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
     }
     res.end();
   } finally {
+    const metrics = metricsCollector.result();
     store.recordRequest({
       apiKeyId: apiKey.id,
       nodeId: node.id,
@@ -299,13 +381,26 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
       model: node.model_id,
       status,
       latencyMs: Date.now() - started,
-      promptTokens: metrics?.prompt_tokens ?? usage?.prompt_tokens,
-      completionTokens: metrics?.completion_tokens ?? usage?.completion_tokens,
-      queueMs: metrics?.queue_ms,
-      ttftMs: metrics?.ttft_ms,
-      throughputTps: metrics?.throughput_tps,
+      promptTokens: metrics.prompt_tokens,
+      completionTokens: metrics.completion_tokens,
+      queueMs: metrics.queue_ms,
+      ttftMs: metrics.ttft_ms,
+      throughputTps: metrics.throughput_tps,
       requestPreview: preview(body ?? {}),
       responsePreview,
     });
+  }
+}
+
+// Client traffic is forwarded verbatim, but the chunk is still inspected so usage
+// and timing are recorded for backends that report no metrics of their own.
+function observeChunk(metricsCollector, data) {
+  if (!data || data === "[DONE]") return;
+  try {
+    const chunk = JSON.parse(data);
+    if (chunk.choices?.[0]?.delta?.content) metricsCollector.markFirstToken();
+    metricsCollector.setUsage(chunk.usage);
+  } catch {
+    // Metrics are best-effort and never change what the client receives.
   }
 }

@@ -68,7 +68,24 @@ const elements = {
   nodeModelId: $("#nodeModelId"),
   nodeOrigin: $("#nodeOrigin"),
   nodeUpstreamKey: $("#nodeUpstreamKey"),
+  nodeProvider: $("#nodeProvider"),
+  nodeAuthType: $("#nodeAuthType"),
+  nodeAuthHeader: $("#nodeAuthHeader"),
+  probeNodeButton: $("#probeNodeButton"),
   toast: $("#toast"),
+};
+
+const PROVIDER_LABELS = {
+  swiftlm: "SwiftLM",
+  vllm: "vLLM",
+  llamacpp: "llama.cpp",
+  generic: "OpenAI 相容",
+};
+
+const AUTH_TYPE_LABELS = {
+  none: "無驗證",
+  bearer: "Bearer Key",
+  api_key_header: "API Key header",
 };
 
 const viewCopy = {
@@ -605,6 +622,28 @@ async function renderKeys(revealedKey) {
   }
 }
 
+function nodeAuthPayload() {
+  const authType = elements.nodeAuthType.value;
+  return {
+    auth_type: authType,
+    upstream_api_key: authType === "none" ? "" : elements.nodeUpstreamKey.value,
+    auth_header: authType === "api_key_header" ? elements.nodeAuthHeader.value : "",
+  };
+}
+
+// Only the fields the selected strategy actually uses stay editable, so a keyless
+// private node is never blocked by a required credential field.
+function syncAuthFields() {
+  const authType = elements.nodeAuthType.value;
+  const needsCredential = authType !== "none";
+  elements.nodeUpstreamKey.disabled = !needsCredential;
+  elements.nodeUpstreamKey.required = needsCredential;
+  elements.nodeUpstreamKey.placeholder = needsCredential
+    ? "貼上該服務的 API Key"
+    : "此驗證方式不需要憑證";
+  elements.nodeAuthHeader.disabled = authType !== "api_key_header";
+}
+
 function renderNodes() {
   const nodes = state.nodes || [];
   const online = nodes.filter((node) => node.status?.state === "online").length;
@@ -622,20 +661,32 @@ function renderNodes() {
       <article class="node-row ${node.enabled ? "" : "disabled"}">
         <span class="node-indicator ${escapeHtml(node.status?.state || "offline")}" aria-hidden="true"></span>
         <div class="node-main">
-          <div class="node-title"><strong>${escapeHtml(node.name)}</strong><span class="state-label ${node.status?.state === "online" ? "active" : ""}">${stateName}</span></div>
+          <div class="node-title">
+            <strong>${escapeHtml(node.name)}</strong>
+            <span class="node-provider-tag">${escapeHtml(PROVIDER_LABELS[node.provider] || node.provider || "swiftlm")}</span>
+            <span class="state-label ${node.status?.state === "online" ? "active" : ""}">${stateName}</span>
+          </div>
           <p>${escapeHtml(node.model_name)} · ${escapeHtml(node.model_id)}</p>
-          <small>最後檢查 ${formatDate(node.status?.checked_at)} · ${latency}</small>
+          <small>最後檢查 ${formatDate(node.status?.checked_at)} · ${latency} · ${escapeHtml(AUTH_TYPE_LABELS[node.auth_type] || node.auth_type || "bearer")}</small>
         </div>
         <div class="node-actions">
           <button class="${node.enabled ? "danger-button" : "toolbar-button"}" data-toggle-node="${escapeHtml(node.id)}" data-node-enabled="${node.enabled ? "0" : "1"}">
             ${node.enabled ? "停用" : "啟用"}
           </button>
-          ${canDelete ? `<button class="toolbar-button" data-edit-node-key="${escapeHtml(node.id)}">更新 Key</button>` : ""}
+          ${canDelete ? `<button class="toolbar-button" data-edit-node-key="${escapeHtml(node.id)}">更新驗證</button>` : ""}
           ${canDelete ? `<button class="danger-button subtle-danger" data-delete-node="${escapeHtml(node.id)}">刪除</button>` : ""}
         </div>
         ${editingKey ? `
           <form class="node-key-update" data-node-key-form="${escapeHtml(node.id)}">
-            <label>新的上游 API Key<input name="upstream_api_key" type="password" autocomplete="new-password" placeholder="貼上新的 API Key" required /></label>
+            <label>驗證方式
+              <select name="auth_type">
+                ${["bearer", "none", "api_key_header"].map((type) => `
+                  <option value="${type}"${(node.auth_type || "bearer") === type ? " selected" : ""}>${escapeHtml(AUTH_TYPE_LABELS[type])}</option>
+                `).join("")}
+              </select>
+            </label>
+            <label>新的上游憑證<input name="upstream_api_key" type="password" autocomplete="new-password" placeholder="切換為「無驗證」時留空" /></label>
+            <label>Header 名稱<input name="auth_header" placeholder="X-API-Key" maxlength="63" value="${escapeHtml(node.auth_header || "")}" /></label>
             <button class="primary" type="submit">儲存</button>
             <button class="toolbar-button" type="button" data-cancel-node-key>取消</button>
           </form>
@@ -695,14 +746,19 @@ function renderNodes() {
   elements.nodeList.querySelectorAll("[data-node-key-form]").forEach((form) => {
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const key = new FormData(form).get("upstream_api_key");
+      const data = new FormData(form);
       try {
-        await request(`/api/nodes/${form.dataset.nodeKeyForm}/upstream-key`, {
-          method: "PATCH", body: JSON.stringify({ upstream_api_key: key }),
+        await request(`/api/nodes/${form.dataset.nodeKeyForm}/auth`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            auth_type: data.get("auth_type"),
+            upstream_api_key: data.get("upstream_api_key"),
+            auth_header: data.get("auth_header"),
+          }),
         });
         state.editingNodeId = null;
         await loadNodes();
-        showToast("上游 API Key 已更新");
+        showToast("節點驗證方式已更新");
       } catch (error) {
         showToast(error.message);
       }
@@ -784,14 +840,47 @@ elements.createNodeForm.addEventListener("submit", async (event) => {
         model_name: elements.nodeModelName.value,
         model_id: elements.nodeModelId.value,
         origin_base_url: elements.nodeOrigin.value,
-        upstream_api_key: elements.nodeUpstreamKey.value,
+        provider: elements.nodeProvider.value,
+        ...nodeAuthPayload(),
       }),
     });
     elements.createNodeForm.reset();
+    syncAuthFields();
     await loadNodes();
     showToast("機器已加入，正在檢查模型狀態");
   } catch (error) {
     showToast(error.message);
+  }
+});
+elements.nodeAuthType.addEventListener("change", syncAuthFields);
+elements.probeNodeButton.addEventListener("click", async () => {
+  if (!elements.nodeOrigin.value.trim()) {
+    showToast("請先輸入節點的 /v1 網址");
+    return;
+  }
+  elements.probeNodeButton.disabled = true;
+  try {
+    const auth = nodeAuthPayload();
+    // Probing is a read-only reachability check, so an endpoint that needs no
+    // credential can be identified before any auth strategy has been chosen.
+    const probe = await request("/api/nodes/probe", {
+      method: "POST",
+      body: JSON.stringify({
+        base_url: elements.nodeOrigin.value,
+        ...(auth.upstream_api_key ? auth : { auth_type: "none" }),
+      }),
+    });
+    elements.nodeProvider.value = probe.provider;
+    // The node already knows which model it serves, so the operator only has to
+    // confirm it instead of retyping an exact model ID.
+    const discovered = probe.models?.[0]?.id;
+    if (discovered && !elements.nodeModelId.value.trim()) elements.nodeModelId.value = discovered;
+    if (discovered && !elements.nodeModelName.value.trim()) elements.nodeModelName.value = discovered;
+    showToast(`偵測到 ${PROVIDER_LABELS[probe.provider] || probe.provider}，共 ${probe.models?.length || 0} 個模型`);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    elements.probeNodeButton.disabled = false;
   }
 });
 elements.conversationSearch.addEventListener("input", () => {
@@ -816,4 +905,5 @@ document.querySelectorAll("[data-view]").forEach((button) => {
   button.addEventListener("click", () => switchView(button.dataset.view));
 });
 
+syncAuthFields();
 bootstrap();

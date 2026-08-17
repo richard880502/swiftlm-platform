@@ -12,7 +12,25 @@ import {
 } from "./auth.js";
 import { loadConfig } from "./config.js";
 import { createStore } from "./db.js";
-import { preview, proxyOpenAI, streamDashboardChat, upstreamJson } from "./proxy.js";
+import {
+  preview,
+  proxyOpenAI,
+  resolveCredential,
+  streamDashboardChat,
+  upstreamJson,
+} from "./proxy.js";
+import {
+  DEFAULT_PROTOCOL,
+  DEFAULT_PROVIDER,
+  authRequiresCredential,
+  buildAuthHeaders,
+  capabilitiesFor,
+  detectProvider,
+  isSupportedAuthType,
+  isSupportedProtocol,
+  isSupportedProvider,
+  providerCatalog,
+} from "./providers.js";
 
 const config = loadConfig();
 const store = createStore(config.databasePath, {
@@ -91,12 +109,42 @@ function normalizedOrigin(value) {
   try {
     const url = new URL(String(value || "").trim());
     if (!["https:", "http:"].includes(url.protocol) || !url.hostname) return "";
+    // A node agent may mount its OpenAI surface under a prefix, so any path is
+    // accepted as long as it ends at the `/v1` root the adapter appends routes to.
     const pathname = url.pathname.replace(/\/+$/, "");
-    if (pathname !== "/v1") return "";
+    if (!pathname.endsWith("/v1")) return "";
     return url.toString().replace(/\/$/, "");
   } catch {
     return "";
   }
+}
+
+function safeHeaderName(value) {
+  const name = String(value || "").trim();
+  return /^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/.test(name) ? name : "";
+}
+
+// Auth style and credential are validated together: a credential is required only
+// when the chosen strategy actually uses one, which is what makes a keyless private
+// node such as vLLM behind a node agent expressible at all.
+function parseAuthInput(body, { defaultAuthType = "bearer" } = {}) {
+  const authType = String(body?.auth_type || defaultAuthType).trim();
+  const credential = String(body?.upstream_api_key || "").trim();
+  const authHeader = body?.auth_header ? safeHeaderName(body.auth_header) : null;
+  if (!isSupportedAuthType(authType)) {
+    return { error: "驗證方式必須是 none、bearer 或 api_key_header（mTLS 尚未支援）。" };
+  }
+  if (authType === "api_key_header" && body?.auth_header && !authHeader) {
+    return { error: "API Key header 名稱只能包含英數字與連字號。" };
+  }
+  if (authRequiresCredential(authType) && !credential) {
+    return { error: "這個驗證方式需要一組上游憑證。" };
+  }
+  return {
+    authType,
+    authHeader: authType === "api_key_header" ? authHeader : null,
+    credential: authType === "none" ? null : credential,
+  };
 }
 
 async function checkNode(node) {
@@ -106,7 +154,13 @@ async function checkNode(node) {
   }
   try {
     const proxyNode = store.getNodeForProxy(node.id);
-    if (!proxyNode?.upstream_api_key) throw new Error("Node API key is unavailable");
+    if (!proxyNode) throw new Error("Node is unavailable");
+    // Only a strategy that uses a credential needs one present. A private node
+    // reachable over Wonder Mesh with auth_type "none" is checked unauthenticated.
+    if (authRequiresCredential(proxyNode.auth_type)
+      && !resolveCredential(config, proxyNode).credential) {
+      throw new Error("Node credential is unavailable");
+    }
     const upstream = await upstreamJson(config, proxyNode, "/models", undefined, {
       signal: AbortSignal.timeout(5_000),
     });
@@ -131,6 +185,7 @@ async function checkNode(node) {
 async function nodeWithStatus(node) {
   return {
     ...node,
+    capabilities: capabilitiesFor(node),
     is_default: node.id === config.defaultNode.id,
     usage: store.getNodeUsage(node.id),
     status: await checkNode(node),
@@ -144,7 +199,11 @@ function resolveEnabledNode(nodeId) {
 
 function resolveEnabledProxyNode(nodeId) {
   const node = store.getNodeForProxy(nodeId);
-  return node?.enabled && node.upstream_api_key ? node : null;
+  if (!node?.enabled) return null;
+  if (authRequiresCredential(node.auth_type) && !resolveCredential(config, node).credential) {
+    return null;
+  }
+  return node;
 }
 
 app.get("/health", (_req, res) => {
@@ -193,20 +252,90 @@ app.get("/api/nodes", requireAdmin, async (_req, res) => {
   res.json({ data: await Promise.all(nodes.map(nodeWithStatus)) });
 });
 
+app.get("/api/providers", requireAdmin, (_req, res) => {
+  res.json({ data: providerCatalog(), protocols: [DEFAULT_PROTOCOL] });
+});
+
+// Backend detection before a node is created: one authenticated `/models` probe
+// identifies the runtime and lists the models it already serves.
+app.post("/api/nodes/probe", requireAdmin, async (req, res) => {
+  const baseUrl = normalizedOrigin(req.body?.base_url);
+  if (!baseUrl) {
+    return res.status(400).json({ error: { message: "請輸入以 /v1 結尾的節點網址" } });
+  }
+  const auth = parseAuthInput(req.body, { defaultAuthType: "none" });
+  if (auth.error) return res.status(400).json({ error: { message: auth.error } });
+  try {
+    const upstream = await fetch(`${baseUrl}/models`, {
+      headers: buildAuthHeaders(auth),
+      signal: AbortSignal.timeout(5_000),
+    });
+    const text = await upstream.text();
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+    if (!upstream.ok) {
+      return res.status(502).json({
+        error: { message: `節點回應 HTTP ${upstream.status}；請確認網址與驗證方式。` },
+      });
+    }
+    const models = Array.isArray(parsed?.data) ? parsed.data : [];
+    const detected = detectProvider({ headers: upstream.headers, models });
+    return res.json({
+      ...detected,
+      protocol: DEFAULT_PROTOCOL,
+      capabilities: capabilitiesFor({ provider: detected.provider }),
+      models: models.slice(0, 50).map((model) => ({
+        id: String(model?.id || ""),
+        owned_by: model?.owned_by ?? null,
+        max_model_len: model?.max_model_len ?? null,
+      })).filter((model) => model.id),
+    });
+  } catch (error) {
+    return res.status(502).json({
+      error: { message: `無法連線到節點：${error.message}` },
+    });
+  }
+});
+
 app.post("/api/nodes", requireAdmin, (req, res) => {
   const name = String(req.body?.name || "").trim().slice(0, 80);
   const modelId = String(req.body?.model_id || "").trim().slice(0, 240);
   const modelName = String(req.body?.model_name || modelId).trim().slice(0, 120);
   const originBaseUrl = normalizedOrigin(req.body?.origin_base_url);
-  const upstreamApiKey = String(req.body?.upstream_api_key || "").trim();
-  if (!name || !modelId || !modelName || !originBaseUrl || !upstreamApiKey) {
-    return res.status(400).json({ error: { message: "請填入機器名稱、模型、以 /v1 結尾的 Origin URL 與該機器的 API Key" } });
+  const provider = String(req.body?.provider || DEFAULT_PROVIDER).trim().toLowerCase();
+  const protocol = String(req.body?.protocol || DEFAULT_PROTOCOL).trim().toLowerCase();
+  if (!name || !modelId || !modelName || !originBaseUrl) {
+    return res.status(400).json({ error: { message: "請填入機器名稱、模型與以 /v1 結尾的節點網址" } });
   }
+  if (!isSupportedProvider(provider)) {
+    return res.status(400).json({ error: { message: "不支援這個 backend；可選 swiftlm、vllm、llamacpp 或 generic。" } });
+  }
+  if (!isSupportedProtocol(protocol)) {
+    return res.status(400).json({ error: { message: "目前只支援 OpenAI-compatible protocol。" } });
+  }
+  // Existing callers post only a key, so bearer stays the default and their nodes
+  // behave exactly as before.
+  const auth = parseAuthInput(req.body, { defaultAuthType: "bearer" });
+  if (auth.error) return res.status(400).json({ error: { message: auth.error } });
   try {
-    const node = store.createNode({ name, modelId, modelName, originBaseUrl, upstreamApiKey });
-    return res.status(201).json(node);
+    const node = store.createNode({
+      name,
+      modelId,
+      modelName,
+      originBaseUrl,
+      provider,
+      protocol,
+      authType: auth.authType,
+      authHeader: auth.authHeader,
+      upstreamApiKey: auth.credential,
+    });
+    return res.status(201).json({ ...node, capabilities: capabilitiesFor(node) });
   } catch (error) {
-    return res.status(409).json({ error: { message: error.message.includes("UNIQUE") ? "這個 Origin URL 已存在" : "無法建立節點" } });
+    return res.status(409).json({ error: { message: error.message.includes("UNIQUE") ? "這個節點網址已存在" : "無法建立節點" } });
   }
 });
 
@@ -222,21 +351,28 @@ app.post("/api/nodes/:id/enabled", requireAdmin, (req, res) => {
   return res.json(store.getNode(id));
 });
 
-app.patch("/api/nodes/:id/upstream-key", requireAdmin, (req, res) => {
+function updateNodeAuth(req, res) {
   const id = safeNodeId(req.params.id);
   if (id === config.defaultNode.id) {
     return res.status(400).json({
-      error: { message: "預設機器的上游 Key 由 Zeabur 環境設定管理，無法在此修改。" },
+      error: { message: "預設機器的上游憑證由 Zeabur 環境設定管理，無法在此修改。" },
     });
   }
-  if (!store.getNode(id)) return res.status(404).json({ error: { message: "Node not found" } });
-  const upstreamApiKey = String(req.body?.upstream_api_key || "").trim();
-  if (!upstreamApiKey) {
-    return res.status(400).json({ error: { message: "請輸入新的上游 API Key" } });
-  }
-  store.updateNodeUpstreamKey(id, upstreamApiKey);
+  const existing = store.getNode(id);
+  if (!existing) return res.status(404).json({ error: { message: "Node not found" } });
+  const auth = parseAuthInput(req.body, { defaultAuthType: existing.auth_type || "bearer" });
+  if (auth.error) return res.status(400).json({ error: { message: auth.error } });
+  store.updateNodeAuth(id, {
+    authType: auth.authType,
+    authHeader: auth.authHeader,
+    upstreamApiKey: auth.credential,
+  });
   return res.json({ ok: true, node: store.getNode(id) });
-});
+}
+
+app.patch("/api/nodes/:id/auth", requireAdmin, updateNodeAuth);
+// Kept so an existing dashboard build can still rotate a bearer credential.
+app.patch("/api/nodes/:id/upstream-key", requireAdmin, updateNodeAuth);
 
 app.delete("/api/nodes/:id", requireAdmin, (req, res) => {
   const id = safeNodeId(req.params.id);
@@ -408,6 +544,8 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
           model: node.model_id,
           status: cancelled ? 499 : completed ? 200 : 502,
           latencyMs: Date.now() - started,
+          // The adapter already merged provider metrics with stream-observed usage,
+          // so unsupported values arrive as null rather than being missing.
           promptTokens: metrics?.prompt_tokens ?? usage?.prompt_tokens,
           completionTokens: metrics?.completion_tokens ?? usage?.completion_tokens,
           queueMs: metrics?.queue_ms,
