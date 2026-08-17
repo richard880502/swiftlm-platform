@@ -69,6 +69,10 @@ const elements = {
   nodeOrigin: $("#nodeOrigin"),
   nodeUpstreamKey: $("#nodeUpstreamKey"),
   nodeProvider: $("#nodeProvider"),
+  enrollmentReveal: $("#enrollmentReveal"),
+  createEnrollmentTokenForm: $("#createEnrollmentTokenForm"),
+  enrollmentLabel: $("#enrollmentLabel"),
+  enrollmentList: $("#enrollmentList"),
   nodeAuthType: $("#nodeAuthType"),
   nodeAuthHeader: $("#nodeAuthHeader"),
   probeNodeButton: $("#probeNodeButton"),
@@ -532,7 +536,10 @@ function switchView(type, options = {}) {
   if (!options.preserveTitle) applyViewCopy(type);
   if (type === "activity") renderActivity();
   if (type === "keys") renderKeys();
-  if (type === "nodes") renderNodes();
+  if (type === "nodes") {
+    renderNodes();
+    renderEnrollmentTokens();
+  }
 }
 
 async function renderActivity() {
@@ -766,6 +773,60 @@ function renderNodes() {
   });
 }
 
+const ENROLLMENT_STATE_LABELS = { pending: "待使用", used: "已使用", expired: "已過期" };
+
+function joinCommand(token) {
+  const server = window.location.origin;
+  return `swiftlm-node join ${token} \\\n  --server ${server} \\\n  --name "GPU 01" \\\n  --base-url https://gpu-01-origin.example/v1 \\\n  --model-id <model-id>`;
+}
+
+async function renderEnrollmentTokens(revealedToken) {
+  if (revealedToken) {
+    elements.enrollmentReveal.classList.remove("hidden");
+    elements.enrollmentReveal.innerHTML = `
+      <div><strong>請立即保存這個 Token</strong><p>10 分鐘內有效、只能使用一次；離開後不會再次顯示。</p></div>
+      <code>${escapeHtml(joinCommand(revealedToken))}</code>
+      <button class="primary" id="copyRevealedToken">複製指令</button>
+    `;
+    $("#copyRevealedToken").addEventListener("click", async () => {
+      await navigator.clipboard.writeText(joinCommand(revealedToken));
+      showToast("Join 指令已複製");
+    });
+  } else {
+    elements.enrollmentReveal.classList.add("hidden");
+    elements.enrollmentReveal.innerHTML = "";
+  }
+
+  elements.enrollmentList.innerHTML = '<div class="loading-row">正在載入 Enrollment Tokens…</div>';
+  try {
+    const result = await request("/api/enrollment-tokens");
+    elements.enrollmentList.innerHTML = result.data.length ? result.data.map((token) => `
+      <article class="key-row ${token.state !== "pending" ? "revoked" : ""}">
+        <div class="key-badge" aria-hidden="true"></div>
+        <div class="key-main">
+          <div class="key-title">
+            <strong>${escapeHtml(token.label || "（未命名）")}</strong>
+            <span class="state-label ${token.state === "pending" ? "active" : ""}">${escapeHtml(ENROLLMENT_STATE_LABELS[token.state] || token.state)}</span>
+          </div>
+          <p>建立於 ${formatDate(token.created_at)} · 到期 ${formatDate(token.expires_at)}${token.used_at ? ` · 已於 ${formatDate(token.used_at)} 使用` : ""}</p>
+        </div>
+        ${token.state === "pending" ? `<button class="danger-button" data-revoke-token="${token.id}">撤銷</button>` : ""}
+      </article>
+    `).join("") : '<div class="empty-list"><strong>尚未產生 Enrollment Token</strong><span>產生一個 token，讓新機器透過 join 指令自行註冊。</span></div>';
+
+    elements.enrollmentList.querySelectorAll("[data-revoke-token]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        if (!confirm("確定撤銷這個 Enrollment Token？")) return;
+        await request(`/api/enrollment-tokens/${button.dataset.revokeToken}`, { method: "DELETE" });
+        await renderEnrollmentTokens();
+        showToast("Enrollment Token 已撤銷");
+      });
+    });
+  } catch (error) {
+    elements.enrollmentList.innerHTML = `<div class="empty-list"><strong>無法載入 Enrollment Tokens</strong><span>${escapeHtml(error.message)}</span></div>`;
+  }
+}
+
 async function updateConversationTarget() {
   if (!state.current || state.current.messages.length > 0 || state.sending || state.current.generation_in_progress) {
     renderNodeOptions();
@@ -830,6 +891,19 @@ elements.conversationNode.addEventListener("change", async () => {
 });
 elements.conversationModel.addEventListener("change", updateConversationTarget);
 elements.refreshNodesButton.addEventListener("click", loadNodes);
+elements.createEnrollmentTokenForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const issued = await request("/api/enrollment-tokens", {
+      method: "POST",
+      body: JSON.stringify({ label: elements.enrollmentLabel.value }),
+    });
+    elements.createEnrollmentTokenForm.reset();
+    await renderEnrollmentTokens(issued.token);
+  } catch (error) {
+    showToast(error.message);
+  }
+});
 elements.createNodeForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   try {

@@ -3,6 +3,7 @@ import http from "node:http";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { resolveCredential, streamDashboardChat, upstreamHeaders } from "../src/proxy.js";
+import { verify } from "../src/nodeAuth.js";
 
 class DisconnectingResponse extends EventEmitter {
   constructor() {
@@ -89,6 +90,29 @@ test("the default node's environment key is never lent to another node", () => {
     upstreamHeaders(config, { id: "gpu-01", auth_type: "none", upstream_api_key: null }),
     {},
   );
+});
+
+test("an enrolled node gets a Gateway-Identity signature on top of its own auth_type", () => {
+  const config = { defaultNode: { id: "mac-mini" } };
+  const enrolled = {
+    id: "gpu-01", auth_type: "none", node_secret: "shared-node-secret",
+    origin_base_url: "http://127.0.0.1:19999/v1",
+  };
+  const headers = upstreamHeaders(config, enrolled, {
+    method: "POST", path: "/chat/completions", body: { messages: [] }, inference: true,
+  });
+  assert.equal(headers.Authorization, undefined, "auth_type none still sends no bearer header");
+  assert.equal(headers["X-Node-Id"], "gpu-01");
+  const verified = verify({
+    secret: "shared-node-secret", method: "POST", path: "/v1/chat/completions", nodeId: "gpu-01",
+    body: { messages: [] },
+    timestamp: headers["X-Node-Timestamp"], nonce: headers["X-Node-Nonce"], signature: headers["X-Node-Signature"],
+  });
+  assert.equal(verified.ok, true);
+
+  // A manually-added node without node_secret must not get a signature at all.
+  const manual = { id: "mac-mini-manual", auth_type: "bearer", upstream_api_key: "k" };
+  assert.equal(upstreamHeaders(config, manual, { method: "GET", path: "/models" })["X-Node-Signature"], undefined);
 });
 
 test("a keyless vLLM node streams through the shared adapter", async (t) => {

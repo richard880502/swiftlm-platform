@@ -44,7 +44,7 @@ Client API 使用 Dashboard 產生的 `sk-mlx-...` key。Origin 只供 Dashboard
 - `mlx`：唯一管理指令。
 - `common.sh`：共用設定與模型路徑解析。
 - `swiftlm-runtime/`：SwiftLM binary 與 Metal runtime。
-- `mlx-gateway/`：統一入口、推理佇列、request ID 與結構化效能紀錄。
+- `mlx-gateway/`：統一入口、推理佇列、request ID 與結構化效能紀錄。可選擇性啟用 node-agent 模式（enrollment、簽章 heartbeat），見 `mlx-gateway/join.mjs` 與 [docs/inference-nodes.md](docs/inference-nodes.md)；未啟用時行為完全不變。
 - `dashboard/`：Zeabur Dashboard、API gateway、聊天及 request history。
 - `deploy/wondermesh/`：Wonder Mesh relay 部署檔。
 - `.state/`：PID 與後台日誌。

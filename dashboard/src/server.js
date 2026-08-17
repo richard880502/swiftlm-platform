@@ -31,6 +31,15 @@ import {
   isSupportedProvider,
   providerCatalog,
 } from "./providers.js";
+import {
+  createNonceCache,
+  digest as sha256Hex,
+  ENROLLMENT_TOKEN_PREFIX,
+  generateEnrollmentToken,
+  generateNodeSecret,
+  parseSignatureHeaders,
+  verify as verifySignature,
+} from "./nodeAuth.js";
 
 const config = loadConfig();
 const store = createStore(config.databasePath, {
@@ -44,6 +53,10 @@ const loginAttempts = new Map();
 // Keep cancellation handles server-side. A browser disconnect intentionally does not
 // abort generation, but an explicit stop action must cancel the upstream stream.
 const activeGenerations = new Map();
+// Bounds replay for Node Identity heartbeats. Scoped to this process: a dashboard
+// restart re-widens the window briefly, which is an acceptable MVP trade-off since
+// the timestamp window alone still bounds it.
+const heartbeatNonceCache = createNonceCache();
 
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
@@ -394,6 +407,124 @@ app.delete("/api/nodes/:id", requireAdmin, (req, res) => {
   return res.status(deleted ? 200 : 409).json(deleted
     ? { ok: true, purged: usage }
     : { error: { message: "無法刪除這台機器" } });
+});
+
+function enrollmentTokenState(token) {
+  if (token.used_at) return "used";
+  if (Date.parse(token.expires_at) <= Date.now()) return "expired";
+  return "pending";
+}
+
+// Enrollment tokens are the credential that lets a node agent register itself: the
+// admin generates one out of band and hands it to whoever is bringing up the new
+// machine, matching the `swiftlm-node join <token>` UX the platform is aiming for.
+app.get("/api/enrollment-tokens", requireAdmin, (_req, res) => {
+  store.pruneExpiredEnrollmentTokens();
+  res.json({ data: store.listEnrollmentTokens().map((token) => ({ ...token, state: enrollmentTokenState(token) })) });
+});
+
+app.post("/api/enrollment-tokens", requireAdmin, (req, res) => {
+  store.pruneExpiredEnrollmentTokens();
+  const label = String(req.body?.label || "").trim().slice(0, 80) || null;
+  const ttlMinutes = Math.min(Math.max(Number(req.body?.ttl_minutes) || 10, 1), 60);
+  const rawToken = generateEnrollmentToken();
+  const created = store.createEnrollmentToken({
+    tokenDigest: sha256Hex(rawToken), label, ttlMs: ttlMinutes * 60_000,
+  });
+  // The raw token is returned exactly once, like an issued client API key; only
+  // its digest is ever persisted from this point on.
+  res.status(201).json({ ...created, token: rawToken, state: "pending", warning: "This token is shown only once." });
+});
+
+app.delete("/api/enrollment-tokens/:id", requireAdmin, (req, res) => {
+  const deleted = store.deleteEnrollmentToken(req.params.id);
+  res.status(deleted ? 200 : 404).json({ ok: deleted });
+});
+
+// Node-agent facing endpoints. These are intentionally not behind requireAdmin:
+// the enrollment token and, after enrollment, the node's own HMAC signature are
+// the credentials here, exactly as Client API Key and Node Identity are separate
+// credential channels from the admin session.
+app.post("/api/node-agent/enroll", async (req, res) => {
+  store.pruneExpiredEnrollmentTokens();
+  const rawToken = String(req.body?.token || "").trim();
+  if (!rawToken.startsWith(ENROLLMENT_TOKEN_PREFIX)) {
+    return res.status(400).json({ error: { message: "缺少或格式錯誤的 enrollment token" } });
+  }
+  const tokenDigest = sha256Hex(rawToken);
+  const existing = store.peekEnrollmentToken(tokenDigest);
+  if (!existing) return res.status(401).json({ error: { message: "Enrollment token 不存在或已被撤銷" } });
+  if (existing.used_at) return res.status(409).json({ error: { message: "Enrollment token 已被使用過" } });
+  if (Date.parse(existing.expires_at) <= Date.now()) {
+    return res.status(410).json({ error: { message: "Enrollment token 已過期" } });
+  }
+
+  const name = String(req.body?.name || "").trim().slice(0, 80);
+  const modelId = String(req.body?.model_id || "").trim().slice(0, 240);
+  const modelName = String(req.body?.model_name || modelId).trim().slice(0, 120);
+  const originBaseUrl = normalizedOrigin(req.body?.base_url);
+  const provider = String(req.body?.provider || DEFAULT_PROVIDER).trim().toLowerCase();
+  const protocol = String(req.body?.protocol || DEFAULT_PROTOCOL).trim().toLowerCase();
+  if (!name || !modelId || !modelName || !originBaseUrl) {
+    return res.status(400).json({ error: { message: "請提供機器名稱、模型與以 /v1 結尾的節點網址" } });
+  }
+  if (!isSupportedProvider(provider)) {
+    return res.status(400).json({ error: { message: "不支援這個 backend" } });
+  }
+  if (!isSupportedProtocol(protocol)) {
+    return res.status(400).json({ error: { message: "目前只支援 OpenAI-compatible protocol" } });
+  }
+  // An enrolled node defaults to auth_type "none": the Gateway-Identity signature
+  // this endpoint sets up is the intended protection, not a bearer key to the
+  // local backend. The operator can still layer a backend credential on top.
+  const auth = parseAuthInput(req.body, { defaultAuthType: "none" });
+  if (auth.error) return res.status(400).json({ error: { message: auth.error } });
+
+  let node;
+  try {
+    node = store.createNode({
+      name, modelId, modelName, originBaseUrl, provider, protocol,
+      authType: auth.authType, authHeader: auth.authHeader, upstreamApiKey: auth.credential,
+    });
+  } catch (error) {
+    return res.status(409).json({ error: { message: error.message.includes("UNIQUE") ? "這個節點網址已存在" : "無法建立節點" } });
+  }
+
+  const nodeSecret = generateNodeSecret();
+  store.setNodeSecret(node.id, nodeSecret);
+  // Claimed after the node exists so a lost race here just leaves an inert,
+  // never-enrolled node behind instead of a token that vanished with nothing to
+  // show for it; self-heal by removing that orphan immediately.
+  if (!store.consumeEnrollmentToken(tokenDigest, node.id)) {
+    store.deleteNode(node.id, { purge: true });
+    return res.status(409).json({ error: { message: "Enrollment token 已被使用過或已過期" } });
+  }
+
+  return res.status(201).json({ node_id: node.id, node_secret: nodeSecret, warning: "node_secret is shown only once." });
+});
+
+app.post("/api/node-agent/:id/heartbeat", (req, res) => {
+  const nodeId = safeNodeId(req.params.id);
+  const node = store.getNodeForProxy(nodeId);
+  if (!node || !node.node_secret) {
+    return res.status(404).json({ error: { message: "Node not found or not enrolled" } });
+  }
+  const { nodeId: claimedNodeId, timestamp, nonce, signature } = parseSignatureHeaders(req.headers);
+  if (claimedNodeId !== nodeId) {
+    return res.status(401).json({ error: { message: "Signature does not match this node" } });
+  }
+  const verified = verifySignature({
+    secret: node.node_secret, method: req.method, path: req.path, nodeId,
+    body: req.body, timestamp, nonce, signature, nonceCache: heartbeatNonceCache,
+  });
+  if (!verified.ok) {
+    return res.status(401).json({ error: { message: `Invalid heartbeat signature (${verified.reason})` } });
+  }
+  store.recordHeartbeat(nodeId, {
+    agentVersion: req.body?.agent_version,
+    capabilities: req.body?.capabilities,
+  });
+  return res.json({ ok: true });
 });
 
 app.get("/api/keys", requireAdmin, (_req, res) => res.json({ data: store.listApiKeys() }));

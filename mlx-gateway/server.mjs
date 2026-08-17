@@ -2,6 +2,15 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import {
+  createNonceCache,
+  loadAgentState,
+  parseSignatureHeaders,
+  sendHeartbeat,
+  verify as verifyGatewaySignature,
+} from "./nodeAgent.mjs";
+
+const NODE_AGENT_VERSION = "mlx-gateway-node-agent/0.1.0";
 
 const listenHost = process.env.GATEWAY_HOST || "0.0.0.0";
 const listenPort = positiveInt(process.env.GATEWAY_PORT, 18124);
@@ -11,6 +20,14 @@ const parallelLimit = positiveInt(process.env.PARALLEL_REQUESTS, 1);
 const maxBodyBytes = positiveInt(process.env.GATEWAY_MAX_BODY_BYTES, 20 * 1024 * 1024);
 const requestLog = process.env.GATEWAY_REQUEST_LOG || path.resolve(".state/requests.jsonl");
 const maxLogBytes = positiveInt(process.env.GATEWAY_LOG_MAX_BYTES, 10 * 1024 * 1024);
+// Node-agent mode is entirely opt-in: it only activates once `join.mjs` has
+// written enrollment state to disk. A gateway that has never enrolled behaves
+// exactly as it always has -- no signature requirement, no heartbeat traffic,
+// zero risk to the existing production deployment that predates this feature.
+const nodeAgentStateFile = process.env.NODE_AGENT_STATE_FILE || path.resolve(".state/node-agent.json");
+const heartbeatIntervalMs = positiveInt(process.env.NODE_AGENT_HEARTBEAT_INTERVAL_MS, 30_000);
+const agentState = loadAgentState(nodeAgentStateFile);
+const gatewaySignatureNonceCache = agentState ? createNonceCache() : null;
 
 const queue = [];
 const running = new Map();
@@ -344,6 +361,49 @@ function proxyUnqueued(request, response, body, requestId, displayPath) {
   upstream.end(body);
 }
 
+// Gateway Identity: once enrolled, every request that would reach the local
+// backend must be signed by the Dashboard's copy of this node's secret. This is
+// what actually closes the gap a manually-added node still has -- knowing this
+// gateway's network address is no longer enough to use the GPU behind it.
+// Monitoring endpoints (`/__mlx/*`) stay loopback-only as before and are not
+// affected, since they are checked before this runs.
+function verifyGatewayRequest(request, body) {
+  const signature = parseSignatureHeaders(request.headers);
+  if (signature.nodeId !== agentState.node_id) return "node id mismatch";
+  const result = verifyGatewaySignature({
+    secret: agentState.node_secret,
+    method: request.method,
+    path: request.url,
+    nodeId: agentState.node_id,
+    body: body.toString("utf8"),
+    timestamp: signature.timestamp,
+    nonce: signature.nonce,
+    signature: signature.signature,
+    nonceCache: gatewaySignatureNonceCache,
+  });
+  return result.ok ? null : result.reason;
+}
+
+function startHeartbeatLoop() {
+  const beat = async () => {
+    try {
+      await sendHeartbeat({
+        dashboardUrl: agentState.dashboard_url,
+        nodeId: agentState.node_id,
+        nodeSecret: agentState.node_secret,
+        agentVersion: NODE_AGENT_VERSION,
+        capabilities: { running: running.size, waiting: queue.length, parallel_limit: parallelLimit },
+      });
+    } catch (error) {
+      // A missed heartbeat just leaves the node looking stale in the dashboard
+      // until the next tick; it must never take inference down.
+      console.error(JSON.stringify({ event: "heartbeat_failed", error: error.message }));
+    }
+  };
+  beat();
+  return setInterval(beat, heartbeatIntervalMs).unref();
+}
+
 const server = http.createServer(async (request, response) => {
   const pathname = new URL(request.url || "/", "http://localhost").pathname;
   if (pathname === "/__mlx/requests" || pathname === "/__mlx/health") {
@@ -356,6 +416,12 @@ const server = http.createServer(async (request, response) => {
   const id = randomUUID();
   try {
     const body = await collectBody(request);
+    if (agentState) {
+      const rejection = verifyGatewayRequest(request, body);
+      if (rejection) {
+        return writeJson(response, 401, { error: { message: `Gateway signature rejected: ${rejection}` }, request_id: id });
+      }
+    }
     if (!isInference(pathname, request.method)) {
       return proxyUnqueued(request, response, body, id, pathname);
     }
@@ -413,7 +479,9 @@ server.listen(listenPort, listenHost, () => {
     upstream: `${upstreamHost}:${upstreamPort}`,
     parallel: parallelLimit,
     request_log: requestLog,
+    node_agent: agentState ? { node_id: agentState.node_id, dashboard_url: agentState.dashboard_url } : null,
   }));
+  if (agentState) startHeartbeatLoop();
 });
 
 function shutdown(signal) {

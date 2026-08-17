@@ -67,6 +67,15 @@ https://richard-swiftlm-origin-7165.zeabur.app/v1
 
 預設機器不能刪除。其他機器可隨時刪除；Dashboard 會先列出影響範圍並要求確認。確認後，該節點的 Dashboard API Key、對話與使用紀錄會一併永久刪除。
 
+### 節點 Enrollment（讓節點自己註冊）
+
+手動加入節點時，Dashboard 相信管理員輸入的網址與憑證。Enrollment 是另一條路徑：在「機器」頁面按「產生 Token」取得一次性 token，節點端執行 `swiftlm-node join <token> ...`（目前是 `mlx-gateway/join.mjs`）即可自行完成註冊，取得只有這個節點知道的簽章身分（`node_secret`），之後：
+
+- 節點每 30 秒送一次簽章 heartbeat 回報 online 狀態與 capabilities。
+- Dashboard 對這個節點的每個請求都會附上同一把 secret 簽出的 Gateway-Identity 簽章，節點端驗證通過才會轉發到本機 backend——這樣即使有第三方知道節點的網路位址，沒有這把 secret 也無法直接使用 GPU。
+
+這個模式完全是 opt-in：沒有跑過 `join.mjs` 的既有節點（包含手動加入的節點）行為不受影響。細節與目前的限制（沒有 Ed25519/mTLS、沒有 outbound tunnel、沒有 secret 輪替）見 [../docs/inference-nodes.md](../docs/inference-nodes.md)。
+
 ## 停止生成
 
 對話生成期間，輸入框右下角會顯示紅色停止按鈕。點擊後 Dashboard 會明確取消該次上游串流並通知 MLX Gateway 取消本機工作；已生成的文字會保留，對話可立即繼續。重新整理頁面不會觸發取消，只有按下停止按鈕才會中止生成。

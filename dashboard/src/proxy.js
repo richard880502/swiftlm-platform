@@ -5,6 +5,7 @@ import {
   readJsonMetrics,
   readStreamEvent,
 } from "./providers.js";
+import { sign } from "./nodeAuth.js";
 
 const PREVIEW_LIMIT = 12_000;
 const UPSTREAM_UNAVAILABLE = "Inference node unavailable";
@@ -30,11 +31,25 @@ export function resolveCredential(config, node) {
   };
 }
 
-export function upstreamHeaders(config, node, { stream = false, json = false, inference = false } = {}) {
+// Gateway Identity: an enrolled node's own signature layer, orthogonal to whatever
+// credential its local backend needs. It is additive -- a node keeps whatever
+// auth_type it was configured with, and gets a signature on top the moment it has
+// a node_secret, regardless of that auth_type. A manually-added node has no
+// node_secret and this is a no-op, so its behaviour is unchanged.
+function gatewayIdentityHeaders(node, { method, path, body }) {
+  if (!node?.node_secret) return {};
+  const signaturePath = new URL(upstreamUrl(node, path)).pathname;
+  return sign({ secret: node.node_secret, method, path: signaturePath, nodeId: node.id, body }).headers;
+}
+
+export function upstreamHeaders(config, node, {
+  method = "GET", path = "", body, stream = false, json = false, inference = false,
+} = {}) {
   return {
     ...buildAuthHeaders(resolveCredential(config, node)),
     ...(inference ? providerHeaders(node, { stream }) : {}),
     ...(json ? { "Content-Type": "application/json" } : {}),
+    ...gatewayIdentityHeaders(node, { method, path, body }),
   };
 }
 
@@ -99,9 +114,10 @@ function sseData(eventText) {
 }
 
 export async function upstreamJson(config, node, path, body, { signal } = {}) {
+  const method = body === undefined ? "GET" : "POST";
   const response = await fetch(upstreamUrl(node, path), {
-    method: body === undefined ? "GET" : "POST",
-    headers: upstreamHeaders(config, node, { json: body !== undefined }),
+    method,
+    headers: upstreamHeaders(config, node, { method, path, body, json: body !== undefined }),
     body: body === undefined ? undefined : JSON.stringify(body),
     signal,
   });
@@ -125,12 +141,14 @@ export async function streamDashboardChat({
   });
 
   const metricsCollector = createMetricsCollector();
+  const preparedBody = prepareRequestBody(node, { ...requestBody, stream: true }, { stream: true });
   const upstream = await fetch(upstreamUrl(node, "/chat/completions"), {
     method: "POST",
-    headers: upstreamHeaders(config, node, { stream: true, json: true, inference: true }),
-    body: JSON.stringify(
-      prepareRequestBody(node, { ...requestBody, stream: true }, { stream: true }),
-    ),
+    headers: upstreamHeaders(config, node, {
+      method: "POST", path: "/chat/completions", body: preparedBody,
+      stream: true, json: true, inference: true,
+    }),
+    body: JSON.stringify(preparedBody),
     signal,
   });
 
@@ -260,6 +278,7 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
     model_id: apiKey.model_id,
     model_name: apiKey.model_name,
     upstream_api_key: apiKey.upstream_api_key,
+    node_secret: apiKey.node_secret,
     provider: apiKey.provider,
     protocol: apiKey.protocol,
     auth_type: apiKey.auth_type,
@@ -298,15 +317,18 @@ export async function proxyOpenAI({ config, req, res, apiKey, store }) {
     }
 
     const isChat = route === "/chat/completions";
+    const preparedBody = isChat
+      ? prepareRequestBody(node, { ...body, model: node.model_id }, { stream })
+      : body;
     const upstream = await fetch(upstreamUrl(node, route), {
       method: req.method,
       headers: {
-        ...upstreamHeaders(config, node, { stream, json: true, inference: true }),
+        ...upstreamHeaders(config, node, {
+          method: req.method, path: route, body: preparedBody, stream, json: true, inference: true,
+        }),
         Accept: req.headers.accept || "application/json",
       },
-      body: JSON.stringify(isChat
-        ? prepareRequestBody(node, { ...body, model: node.model_id }, { stream })
-        : body),
+      body: JSON.stringify(preparedBody),
     });
     status = upstream.status;
     res.status(status);
