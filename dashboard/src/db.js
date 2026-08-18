@@ -96,12 +96,52 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
       response_preview TEXT,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS enrollment_tokens (
+      id TEXT PRIMARY KEY,
+      token_digest TEXT NOT NULL UNIQUE,
+      label TEXT,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL
+    );
+    -- One row per model an endpoint accepts in its "model" field. Deliberately has
+    -- no origin_base_url/credential override: a node is one network endpoint and
+    -- one node-agent identity, so a second physical port is a second node, not a
+    -- second row here. This only covers a backend that natively multiplexes
+    -- several models behind the one endpoint it already has (vLLM, Ollama,
+    -- LM Studio, ...).
+    CREATE TABLE IF NOT EXISTS node_models (
+      id TEXT PRIMARY KEY,
+      node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+      model_id TEXT NOT NULL,
+      model_name TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(node_id, model_id)
+    );
   `);
 
   // Keep existing installations compatible: SQLite cannot add a non-null foreign key
   // to a populated table, so legacy records are backfilled below after the default node exists.
   addColumnIfMissing(db, "api_keys", "node_id", "node_id TEXT REFERENCES nodes(id) ON DELETE RESTRICT");
   addColumnIfMissing(db, "nodes", "upstream_api_key", "upstream_api_key TEXT");
+  // Nodes started out as SwiftLM-only, so every backend descriptor defaults to the
+  // behaviour existing rows already relied on: SwiftLM over OpenAI with a bearer key.
+  addColumnIfMissing(db, "nodes", "provider", "provider TEXT NOT NULL DEFAULT 'swiftlm'");
+  addColumnIfMissing(db, "nodes", "protocol", "protocol TEXT NOT NULL DEFAULT 'openai'");
+  addColumnIfMissing(db, "nodes", "auth_type", "auth_type TEXT NOT NULL DEFAULT 'bearer'");
+  addColumnIfMissing(db, "nodes", "auth_header", "auth_header TEXT");
+  addColumnIfMissing(db, "nodes", "capabilities", "capabilities TEXT");
+  // Node Identity / Gateway Identity: a separate shared secret from the node's own
+  // credential to its local backend (upstream_api_key). NULL until the node
+  // enrolls through a one-time token; a manually-added node never gets one and is
+  // trusted only as far as its network path (Wonder Mesh, private LAN) allows.
+  addColumnIfMissing(db, "nodes", "node_secret", "node_secret TEXT");
+  addColumnIfMissing(db, "nodes", "enrolled_at", "enrolled_at TEXT");
+  addColumnIfMissing(db, "nodes", "last_heartbeat_at", "last_heartbeat_at TEXT");
+  addColumnIfMissing(db, "nodes", "agent_version", "agent_version TEXT");
   addColumnIfMissing(db, "conversations", "node_id", "node_id TEXT REFERENCES nodes(id) ON DELETE RESTRICT");
   addColumnIfMissing(db, "conversations", "model_id", "model_id TEXT");
   addColumnIfMissing(db, "api_requests", "node_id", "node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL");
@@ -113,6 +153,8 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
     CREATE INDEX IF NOT EXISTS api_requests_created_idx ON api_requests(created_at DESC);
     CREATE INDEX IF NOT EXISTS api_requests_node_idx ON api_requests(node_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS api_keys_node_idx ON api_keys(node_id);
+    CREATE INDEX IF NOT EXISTS enrollment_tokens_expires_idx ON enrollment_tokens(expires_at);
+    CREATE INDEX IF NOT EXISTS node_models_node_idx ON node_models(node_id);
   `);
 
   if (!defaultNode?.id) throw new Error("A default SwiftLM node is required");
@@ -144,27 +186,56 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
   db.prepare("UPDATE conversations SET model_id = ? WHERE model_id IS NULL").run(defaultNode.modelId);
   db.prepare("UPDATE api_requests SET node_id = ? WHERE node_id IS NULL").run(defaultNode.id);
 
+  // node_models is the single source of truth for "which models can this node
+  // serve" going forward; nodes.model_id/model_name stay only as the default a
+  // new conversation targets. Every node -- including ones created before this
+  // table existed, and the default node just upserted above -- must have at
+  // least its own primary model registered here.
+  db.prepare(`
+    INSERT INTO node_models(id, node_id, model_id, model_name, enabled, created_at, updated_at)
+    SELECT lower(hex(randomblob(16))), id, model_id, model_name, 1, updated_at, updated_at
+    FROM nodes
+    WHERE NOT EXISTS (
+      SELECT 1 FROM node_models WHERE node_models.node_id = nodes.id AND node_models.model_id = nodes.model_id
+    )
+  `).run();
+
+  // Every node read shares one column list so a new backend descriptor field cannot
+  // be exposed on one code path and silently missing on another.
+  const NODE_COLUMNS = `id, name, origin_base_url, model_id, model_name,
+      provider, protocol, auth_type, auth_header, capabilities,
+      enabled, enrolled_at, last_heartbeat_at, agent_version, created_at, updated_at`;
+
   const statements = {
     insertNode: db.prepare(`
-      INSERT INTO nodes(id, name, origin_base_url, model_id, model_name, upstream_api_key, enabled, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
+      INSERT INTO nodes(
+        id, name, origin_base_url, model_id, model_name,
+        provider, protocol, auth_type, auth_header, capabilities,
+        upstream_api_key, enabled, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
     `),
-    listNodes: db.prepare(`
-      SELECT id, name, origin_base_url, model_id, model_name, enabled, created_at, updated_at
-      FROM nodes ORDER BY created_at ASC
-    `),
-    getNode: db.prepare(`
-      SELECT id, name, origin_base_url, model_id, model_name, enabled, created_at, updated_at
-      FROM nodes WHERE id = ?
-    `),
-    getNodeForProxy: db.prepare(`
-      SELECT id, name, origin_base_url, model_id, model_name, upstream_api_key, enabled, created_at, updated_at
-      FROM nodes WHERE id = ?
-    `),
+    listNodes: db.prepare(`SELECT ${NODE_COLUMNS} FROM nodes ORDER BY created_at ASC`),
+    getNode: db.prepare(`SELECT ${NODE_COLUMNS} FROM nodes WHERE id = ?`),
+    getNodeForProxy: db.prepare(`SELECT ${NODE_COLUMNS}, upstream_api_key, node_secret FROM nodes WHERE id = ?`),
     setNodeEnabled: db.prepare("UPDATE nodes SET enabled = ?, updated_at = ? WHERE id = ?"),
     updateNodeUpstreamKey: db.prepare(
       "UPDATE nodes SET upstream_api_key = ?, updated_at = ? WHERE id = ?",
     ),
+    updateNodeAuth: db.prepare(`
+      UPDATE nodes SET auth_type = ?, auth_header = ?, upstream_api_key = ?, updated_at = ?
+      WHERE id = ?
+    `),
+    setNodeSecret: db.prepare(
+      "UPDATE nodes SET node_secret = ?, enrolled_at = ?, updated_at = ? WHERE id = ?",
+    ),
+    // A heartbeat that reports no capabilities must not erase what an earlier
+    // heartbeat already established, so the column only advances via COALESCE.
+    recordHeartbeat: db.prepare(`
+      UPDATE nodes
+      SET last_heartbeat_at = ?, agent_version = COALESCE(?, agent_version),
+          capabilities = COALESCE(?, capabilities), updated_at = ?
+      WHERE id = ?
+    `),
     nodeUsage: db.prepare(`
       SELECT
         (SELECT COUNT(*) FROM api_keys WHERE node_id = ?) AS api_key_count,
@@ -175,13 +246,31 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
     deleteNodeKeys: db.prepare("DELETE FROM api_keys WHERE node_id = ?"),
     deleteNodeConversations: db.prepare("DELETE FROM conversations WHERE node_id = ?"),
     deleteNode: db.prepare("DELETE FROM nodes WHERE id = ?"),
+    listNodeModels: db.prepare(`
+      SELECT id, node_id, model_id, model_name, enabled, created_at, updated_at
+      FROM node_models WHERE node_id = ? ORDER BY created_at ASC
+    `),
+    getEnabledNodeModel: db.prepare(
+      "SELECT id, model_id, model_name FROM node_models WHERE node_id = ? AND model_id = ? AND enabled = 1",
+    ),
+    insertNodeModel: db.prepare(`
+      INSERT INTO node_models(id, node_id, model_id, model_name, enabled, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 1, ?, ?)
+    `),
+    setNodeModelEnabled: db.prepare(
+      "UPDATE node_models SET enabled = ?, updated_at = ? WHERE id = ? AND node_id = ?",
+    ),
+    getNodeModelById: db.prepare("SELECT id, model_id FROM node_models WHERE id = ? AND node_id = ?"),
+    deleteNodeModel: db.prepare("DELETE FROM node_models WHERE id = ? AND node_id = ?"),
     insertKey: db.prepare(`
       INSERT INTO api_keys(id, name, prefix, digest, node_id, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `),
     getKeyByDigest: db.prepare(`
       SELECT k.id, k.name, k.prefix, k.node_id, k.created_at, k.last_used_at, k.revoked_at,
-             n.name AS node_name, n.origin_base_url, n.model_id, n.model_name, n.upstream_api_key,
+             n.name AS node_name, n.origin_base_url, n.model_id, n.model_name,
+             n.upstream_api_key, n.node_secret,
+             n.provider, n.protocol, n.auth_type, n.auth_header, n.capabilities,
              n.enabled AS node_enabled
       FROM api_keys k JOIN nodes n ON n.id = k.node_id WHERE k.digest = ?
     `),
@@ -241,23 +330,106 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
       LEFT JOIN nodes n ON n.id = r.node_id
       ORDER BY r.created_at DESC LIMIT ?
     `),
+    insertEnrollmentToken: db.prepare(`
+      INSERT INTO enrollment_tokens(id, token_digest, label, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?)
+    `),
+    listEnrollmentTokens: db.prepare(`
+      SELECT id, label, created_at, expires_at, used_at, node_id
+      FROM enrollment_tokens ORDER BY created_at DESC LIMIT 100
+    `),
+    // A single UPDATE ... WHERE guards single-use atomically: a second concurrent
+    // enrollment attempt with the same token cannot both succeed, because only the
+    // request that actually flips used_at from NULL sees changes > 0.
+    consumeEnrollmentToken: db.prepare(`
+      UPDATE enrollment_tokens SET used_at = ?, node_id = ?
+      WHERE token_digest = ? AND used_at IS NULL AND expires_at > ?
+    `),
+    getEnrollmentTokenByDigest: db.prepare(
+      "SELECT id, expires_at, used_at FROM enrollment_tokens WHERE token_digest = ?",
+    ),
+    deleteEnrollmentToken: db.prepare(
+      "DELETE FROM enrollment_tokens WHERE id = ? AND used_at IS NULL",
+    ),
+    pruneExpiredEnrollmentTokens: db.prepare(
+      "DELETE FROM enrollment_tokens WHERE used_at IS NULL AND expires_at <= ?",
+    ),
   };
 
   return {
     close: () => db.close(),
-    createNode({ id = randomUUID(), name, originBaseUrl, modelId, modelName, upstreamApiKey }) {
+    createNode({
+      id = randomUUID(),
+      name,
+      originBaseUrl,
+      modelId,
+      modelName,
+      upstreamApiKey,
+      provider = "swiftlm",
+      protocol = "openai",
+      authType = "bearer",
+      authHeader = null,
+      capabilities = null,
+    }) {
       const createdAt = now();
       statements.insertNode.run(
         id, name, originBaseUrl, modelId, modelName,
+        provider, protocol, authType, authHeader || null,
+        capabilities ? JSON.stringify(capabilities) : null,
         encryptNodeKey(upstreamApiKey, nodeKey), createdAt, createdAt,
       );
+      // node_models is the source of truth for which models a node can serve, so
+      // creating a node always registers its own primary model there too.
+      statements.insertNodeModel.run(randomUUID(), id, modelId, modelName, createdAt, createdAt);
       return statements.getNode.get(id);
     },
     listNodes: () => statements.listNodes.all(),
+    listNodeModels: (nodeId) => statements.listNodeModels.all(nodeId),
+    isModelAllowedOnNode(nodeId, modelId) {
+      return Boolean(statements.getEnabledNodeModel.get(nodeId, modelId));
+    },
+    addNodeModel(nodeId, { modelId, modelName }) {
+      const timestamp = now();
+      statements.insertNodeModel.run(randomUUID(), nodeId, modelId, modelName || modelId, timestamp, timestamp);
+      return statements.listNodeModels.all(nodeId);
+    },
+    setNodeModelEnabled(nodeId, rowId, enabled) {
+      return statements.setNodeModelEnabled.run(enabled ? 1 : 0, now(), rowId, nodeId).changes > 0;
+    },
+    // A node must always be able to serve at least one model, so the last
+    // remaining row (enabled or not) can never be removed -- the operator must
+    // delete the whole node instead, the same way a node can't be left with zero
+    // client keys but can certainly be deleted outright.
+    deleteNodeModel(nodeId, rowId) {
+      const row = statements.getNodeModelById.get(rowId, nodeId);
+      if (!row) return { ok: false, reason: "not_found" };
+      const remaining = statements.listNodeModels.all(nodeId).filter((model) => model.id !== rowId);
+      if (remaining.length === 0) return { ok: false, reason: "last_model" };
+      statements.deleteNodeModel.run(rowId, nodeId);
+      return { ok: true };
+    },
     getNode: (id) => statements.getNode.get(id) || null,
     getNodeForProxy(id) {
       const node = statements.getNodeForProxy.get(id);
-      return node ? { ...node, upstream_api_key: decryptNodeKey(node.upstream_api_key, nodeKey) } : null;
+      if (!node) return null;
+      return {
+        ...node,
+        upstream_api_key: decryptNodeKey(node.upstream_api_key, nodeKey),
+        node_secret: decryptNodeKey(node.node_secret, nodeKey),
+      };
+    },
+    // Only set once, at enrollment. There is no rotation endpoint yet: re-enrolling
+    // with a fresh token issues a new node ID rather than replacing this secret,
+    // the same way a client API key is revoked and reissued rather than edited.
+    setNodeSecret(id, secret) {
+      const timestamp = now();
+      return statements.setNodeSecret.run(encryptNodeKey(secret, nodeKey), timestamp, timestamp, id).changes > 0;
+    },
+    recordHeartbeat(id, { agentVersion, capabilities } = {}) {
+      const timestamp = now();
+      return statements.recordHeartbeat.run(
+        timestamp, agentVersion || null, capabilities ? JSON.stringify(capabilities) : null, timestamp, id,
+      ).changes > 0;
     },
     setNodeEnabled(id, enabled) {
       return statements.setNodeEnabled.run(enabled ? 1 : 0, now(), id).changes > 0;
@@ -265,6 +437,17 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
     updateNodeUpstreamKey(id, upstreamApiKey) {
       return statements.updateNodeUpstreamKey.run(
         encryptNodeKey(upstreamApiKey, nodeKey), now(), id,
+      ).changes > 0;
+    },
+    // A credential is only one of several strategies, so changing it and changing the
+    // strategy is a single operation: switching a node to "none" must also clear the key.
+    updateNodeAuth(id, { authType, authHeader = null, upstreamApiKey = null }) {
+      return statements.updateNodeAuth.run(
+        authType,
+        authHeader || null,
+        authType === "none" ? null : encryptNodeKey(upstreamApiKey, nodeKey),
+        now(),
+        id,
       ).changes > 0;
     },
     getNodeUsage(id) {
@@ -295,7 +478,11 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
       const key = statements.getKeyByDigest.get(digest);
       if (!key || key.revoked_at || !key.node_enabled) return null;
       statements.touchKey.run(now(), key.id);
-      return { ...key, upstream_api_key: decryptNodeKey(key.upstream_api_key, nodeKey) };
+      return {
+        ...key,
+        upstream_api_key: decryptNodeKey(key.upstream_api_key, nodeKey),
+        node_secret: decryptNodeKey(key.node_secret, nodeKey),
+      };
     },
     listApiKeys: () => statements.listKeys.all(),
     revokeApiKey(id) {
@@ -349,6 +536,30 @@ export function createStore(databasePath, { defaultNode, nodeSecret } = {}) {
     },
     listRequests(limit = 100) {
       return statements.listRequests.all(Math.min(Math.max(limit, 1), 250));
+    },
+    // The raw token is returned only here, at creation, exactly like an issued
+    // client API key -- the database keeps only its digest from this point on.
+    createEnrollmentToken({ id = randomUUID(), tokenDigest, label = null, ttlMs }) {
+      const createdAt = now();
+      const expiresAt = new Date(Date.parse(createdAt) + ttlMs).toISOString();
+      statements.insertEnrollmentToken.run(id, tokenDigest, label, createdAt, expiresAt);
+      return { id, label, created_at: createdAt, expires_at: expiresAt };
+    },
+    listEnrollmentTokens: () => statements.listEnrollmentTokens.all(),
+    deleteEnrollmentToken(id) {
+      return statements.deleteEnrollmentToken.run(id).changes > 0;
+    },
+    // Returns the token row only to distinguish "already used" from "never
+    // existed" for the caller's error message; the actual single-use guarantee
+    // comes from the atomic UPDATE below, not from this read.
+    peekEnrollmentToken(tokenDigest) {
+      return statements.getEnrollmentTokenByDigest.get(tokenDigest) || null;
+    },
+    consumeEnrollmentToken(tokenDigest, nodeId) {
+      return statements.consumeEnrollmentToken.run(now(), nodeId, tokenDigest, now()).changes > 0;
+    },
+    pruneExpiredEnrollmentTokens() {
+      statements.pruneExpiredEnrollmentTokens.run(now());
     },
   };
 }

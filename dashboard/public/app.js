@@ -10,6 +10,7 @@ const state = {
   generationPollTimer: null,
   statusPollTimer: null,
   editingNodeId: null,
+  addingModelNodeId: null,
   stopping: false,
 };
 
@@ -68,7 +69,28 @@ const elements = {
   nodeModelId: $("#nodeModelId"),
   nodeOrigin: $("#nodeOrigin"),
   nodeUpstreamKey: $("#nodeUpstreamKey"),
+  nodeProvider: $("#nodeProvider"),
+  enrollmentReveal: $("#enrollmentReveal"),
+  createEnrollmentTokenForm: $("#createEnrollmentTokenForm"),
+  enrollmentLabel: $("#enrollmentLabel"),
+  enrollmentList: $("#enrollmentList"),
+  nodeAuthType: $("#nodeAuthType"),
+  nodeAuthHeader: $("#nodeAuthHeader"),
+  probeNodeButton: $("#probeNodeButton"),
   toast: $("#toast"),
+};
+
+const PROVIDER_LABELS = {
+  swiftlm: "SwiftLM",
+  vllm: "vLLM",
+  llamacpp: "llama.cpp",
+  generic: "OpenAI 相容",
+};
+
+const AUTH_TYPE_LABELS = {
+  none: "無驗證",
+  bearer: "Bearer Key",
+  api_key_header: "API Key header",
 };
 
 const viewCopy = {
@@ -179,13 +201,22 @@ function renderNodeOptions() {
   renderModelOptions(selectedId);
 }
 
+function nodeModels(node) {
+  const models = (node?.models || []).filter((model) => model.enabled);
+  // A node written before per-node model lists existed, or one whose models API
+  // call hasn't resolved yet, still has its own primary model to fall back to.
+  return models.length ? models : node ? [{ model_id: node.model_id, model_name: node.model_name }] : [];
+}
+
 function renderModelOptions(nodeId = elements.conversationNode.value) {
   const node = state.nodes.find((item) => item.id === nodeId);
-  const value = node?.model_id || "";
-  elements.conversationModel.innerHTML = node
-    ? `<option value="${escapeHtml(value)}">${escapeHtml(node.model_name)}</option>`
-    : "";
-  elements.conversationModel.value = state.current?.model_id === value ? value : value;
+  const models = nodeModels(node);
+  const preferred = state.current?.node_id === nodeId ? state.current?.model_id : null;
+  const value = models.some((model) => model.model_id === preferred) ? preferred : models[0]?.model_id || "";
+  elements.conversationModel.innerHTML = models
+    .map((model) => `<option value="${escapeHtml(model.model_id)}">${escapeHtml(model.model_name)}</option>`)
+    .join("");
+  elements.conversationModel.value = value;
 }
 
 function updateNodeStatus() {
@@ -219,7 +250,7 @@ async function loadNodes() {
     state.nodes = result.data || [];
     renderNodeOptions();
     updateNodeStatus();
-    if (state.currentView === "nodes" && !state.editingNodeId) renderNodes();
+    if (state.currentView === "nodes" && !state.editingNodeId && !state.addingModelNodeId) renderNodes();
   } catch {
     state.nodes = [];
     updateNodeStatus();
@@ -515,7 +546,10 @@ function switchView(type, options = {}) {
   if (!options.preserveTitle) applyViewCopy(type);
   if (type === "activity") renderActivity();
   if (type === "keys") renderKeys();
-  if (type === "nodes") renderNodes();
+  if (type === "nodes") {
+    renderNodes();
+    renderEnrollmentTokens();
+  }
 }
 
 async function renderActivity() {
@@ -605,6 +639,101 @@ async function renderKeys(revealedKey) {
   }
 }
 
+function nodeAuthPayload() {
+  const authType = elements.nodeAuthType.value;
+  return {
+    auth_type: authType,
+    upstream_api_key: authType === "none" ? "" : elements.nodeUpstreamKey.value,
+    auth_header: authType === "api_key_header" ? elements.nodeAuthHeader.value : "",
+  };
+}
+
+// Only the fields the selected strategy actually uses stay editable, so a keyless
+// private node is never blocked by a required credential field.
+function syncAuthFields() {
+  const authType = elements.nodeAuthType.value;
+  const needsCredential = authType !== "none";
+  elements.nodeUpstreamKey.disabled = !needsCredential;
+  elements.nodeUpstreamKey.required = needsCredential;
+  elements.nodeUpstreamKey.placeholder = needsCredential
+    ? "貼上該服務的 API Key"
+    : "此驗證方式不需要憑證";
+  elements.nodeAuthHeader.disabled = authType !== "api_key_header";
+}
+
+function renderModelChips(node) {
+  const models = node.models || [];
+  return `
+    <div class="node-models">
+      ${models.map((model) => `
+        <span class="model-chip ${model.enabled ? "" : "disabled"}">
+          <span>${escapeHtml(model.model_name)}</span>
+          <code>${escapeHtml(model.model_id)}</code>
+          <button type="button" data-toggle-model="${escapeHtml(model.id)}" data-model-node="${escapeHtml(node.id)}"
+            data-model-enabled="${model.enabled ? "0" : "1"}" title="${model.enabled ? "停用這個模型" : "啟用這個模型"}">
+            ${model.enabled ? "●" : "○"}
+          </button>
+          ${models.length > 1 ? `<button type="button" data-remove-model="${escapeHtml(model.id)}" data-model-node="${escapeHtml(node.id)}" title="移除這個模型">×</button>` : ""}
+        </span>
+      `).join("")}
+      <button type="button" class="toolbar-button subtle-button" data-add-model="${escapeHtml(node.id)}">+ 新增模型</button>
+    </div>
+  `;
+}
+
+function renderNodeRow(node) {
+  const stateName = node.status?.state === "online" ? "在線"
+    : node.status?.state === "disabled" ? "已停用" : "離線";
+  const latency = node.status?.latency_ms == null ? "—" : `${formatNumber(node.status.latency_ms)} ms`;
+  const canDelete = !node.is_default;
+  const editingKey = state.editingNodeId === node.id;
+  const addingModel = state.addingModelNodeId === node.id;
+  return `
+      <article class="node-row ${node.enabled ? "" : "disabled"}">
+        <span class="node-indicator ${escapeHtml(node.status?.state || "offline")}" aria-hidden="true"></span>
+        <div class="node-main">
+          <div class="node-title">
+            <strong>${escapeHtml(node.name)}</strong>
+            <span class="node-provider-tag">${escapeHtml(PROVIDER_LABELS[node.provider] || node.provider || "swiftlm")}</span>
+            <span class="state-label ${node.status?.state === "online" ? "active" : ""}">${stateName}</span>
+          </div>
+          ${renderModelChips(node)}
+          <small>最後檢查 ${formatDate(node.status?.checked_at)} · ${latency} · ${escapeHtml(AUTH_TYPE_LABELS[node.auth_type] || node.auth_type || "bearer")}</small>
+        </div>
+        <div class="node-actions">
+          <button class="${node.enabled ? "danger-button" : "toolbar-button"}" data-toggle-node="${escapeHtml(node.id)}" data-node-enabled="${node.enabled ? "0" : "1"}">
+            ${node.enabled ? "停用" : "啟用"}
+          </button>
+          ${canDelete ? `<button class="toolbar-button" data-edit-node-key="${escapeHtml(node.id)}">更新驗證</button>` : ""}
+          ${canDelete ? `<button class="danger-button subtle-danger" data-delete-node="${escapeHtml(node.id)}">刪除</button>` : ""}
+        </div>
+        ${editingKey ? `
+          <form class="node-key-update" data-node-key-form="${escapeHtml(node.id)}">
+            <label>驗證方式
+              <select name="auth_type">
+                ${["bearer", "none", "api_key_header"].map((type) => `
+                  <option value="${type}"${(node.auth_type || "bearer") === type ? " selected" : ""}>${escapeHtml(AUTH_TYPE_LABELS[type])}</option>
+                `).join("")}
+              </select>
+            </label>
+            <label>新的上游憑證<input name="upstream_api_key" type="password" autocomplete="new-password" placeholder="切換為「無驗證」時留空" /></label>
+            <label>Header 名稱<input name="auth_header" placeholder="X-API-Key" maxlength="63" value="${escapeHtml(node.auth_header || "")}" /></label>
+            <button class="primary" type="submit">儲存</button>
+            <button class="toolbar-button" type="button" data-cancel-node-key>取消</button>
+          </form>
+        ` : ""}
+        ${addingModel ? `
+          <form class="node-key-update" data-node-model-form="${escapeHtml(node.id)}">
+            <label>模型 ID<input name="model_id" placeholder="例如 Qwen/Qwen3-14B" maxlength="240" required /></label>
+            <label>顯示名稱<input name="model_name" placeholder="選填，預設同模型 ID" maxlength="120" /></label>
+            <button class="primary" type="submit">新增</button>
+            <button class="toolbar-button" type="button" data-cancel-model>取消</button>
+          </form>
+        ` : ""}
+      </article>
+    `;
+}
+
 function renderNodes() {
   const nodes = state.nodes || [];
   const online = nodes.filter((node) => node.status?.state === "online").length;
@@ -612,36 +741,18 @@ function renderNodes() {
   elements.nodeCount.textContent = formatNumber(nodes.length);
   elements.onlineNodeCount.textContent = `${formatNumber(online)} / ${formatNumber(nodes.length)}`;
   elements.availableModelCount.textContent = formatNumber(available);
+  // One malformed node must never blank the whole list: without this, an
+  // exception thrown while building any single row aborts the .map() call
+  // entirely, and since the summary counts above are already written by then,
+  // the counts look right while the list itself silently keeps its last
+  // successful (stale) content -- a confusing, hard-to-notice failure mode.
   elements.nodeList.innerHTML = nodes.length ? nodes.map((node) => {
-    const stateName = node.status?.state === "online" ? "在線"
-      : node.status?.state === "disabled" ? "已停用" : "離線";
-    const latency = node.status?.latency_ms == null ? "—" : `${formatNumber(node.status.latency_ms)} ms`;
-    const canDelete = !node.is_default;
-    const editingKey = state.editingNodeId === node.id;
-    return `
-      <article class="node-row ${node.enabled ? "" : "disabled"}">
-        <span class="node-indicator ${escapeHtml(node.status?.state || "offline")}" aria-hidden="true"></span>
-        <div class="node-main">
-          <div class="node-title"><strong>${escapeHtml(node.name)}</strong><span class="state-label ${node.status?.state === "online" ? "active" : ""}">${stateName}</span></div>
-          <p>${escapeHtml(node.model_name)} · ${escapeHtml(node.model_id)}</p>
-          <small>最後檢查 ${formatDate(node.status?.checked_at)} · ${latency}</small>
-        </div>
-        <div class="node-actions">
-          <button class="${node.enabled ? "danger-button" : "toolbar-button"}" data-toggle-node="${escapeHtml(node.id)}" data-node-enabled="${node.enabled ? "0" : "1"}">
-            ${node.enabled ? "停用" : "啟用"}
-          </button>
-          ${canDelete ? `<button class="toolbar-button" data-edit-node-key="${escapeHtml(node.id)}">更新 Key</button>` : ""}
-          ${canDelete ? `<button class="danger-button subtle-danger" data-delete-node="${escapeHtml(node.id)}">刪除</button>` : ""}
-        </div>
-        ${editingKey ? `
-          <form class="node-key-update" data-node-key-form="${escapeHtml(node.id)}">
-            <label>新的上游 API Key<input name="upstream_api_key" type="password" autocomplete="new-password" placeholder="貼上新的 API Key" required /></label>
-            <button class="primary" type="submit">儲存</button>
-            <button class="toolbar-button" type="button" data-cancel-node-key>取消</button>
-          </form>
-        ` : ""}
-      </article>
-    `;
+    try {
+      return renderNodeRow(node);
+    } catch (error) {
+      console.error("Failed to render node row", node?.id, error);
+      return `<article class="node-row"><div class="node-main"><strong>${escapeHtml(node?.name || node?.id || "unknown")}</strong><p>這台機器目前無法顯示（詳情見主控台）。</p></div></article>`;
+    }
   }).join("") : '<div class="empty-list"><strong>尚未加入機器</strong><span>加入已透過 Wonder Mesh 發布的 SwiftLM Origin。</span></div>';
 
   elements.nodeList.querySelectorAll("[data-toggle-node]").forEach((button) => {
@@ -695,19 +806,134 @@ function renderNodes() {
   elements.nodeList.querySelectorAll("[data-node-key-form]").forEach((form) => {
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const key = new FormData(form).get("upstream_api_key");
+      const data = new FormData(form);
       try {
-        await request(`/api/nodes/${form.dataset.nodeKeyForm}/upstream-key`, {
-          method: "PATCH", body: JSON.stringify({ upstream_api_key: key }),
+        await request(`/api/nodes/${form.dataset.nodeKeyForm}/auth`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            auth_type: data.get("auth_type"),
+            upstream_api_key: data.get("upstream_api_key"),
+            auth_header: data.get("auth_header"),
+          }),
         });
         state.editingNodeId = null;
         await loadNodes();
-        showToast("上游 API Key 已更新");
+        showToast("節點驗證方式已更新");
       } catch (error) {
         showToast(error.message);
       }
     });
   });
+  elements.nodeList.querySelectorAll("[data-add-model]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.addingModelNodeId = button.dataset.addModel;
+      renderNodes();
+      elements.nodeList.querySelector("[data-node-model-form] input")?.focus();
+    });
+  });
+  elements.nodeList.querySelectorAll("[data-cancel-model]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.addingModelNodeId = null;
+      renderNodes();
+    });
+  });
+  elements.nodeList.querySelectorAll("[data-node-model-form]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const data = new FormData(form);
+      try {
+        await request(`/api/nodes/${form.dataset.nodeModelForm}/models`, {
+          method: "POST",
+          body: JSON.stringify({ model_id: data.get("model_id"), model_name: data.get("model_name") }),
+        });
+        state.addingModelNodeId = null;
+        await loadNodes();
+        showToast("模型已新增");
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+  elements.nodeList.querySelectorAll("[data-toggle-model]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await request(`/api/nodes/${button.dataset.modelNode}/models/${button.dataset.toggleModel}/enabled`, {
+          method: "PATCH", body: JSON.stringify({ enabled: button.dataset.modelEnabled === "1" }),
+        });
+        await loadNodes();
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+  elements.nodeList.querySelectorAll("[data-remove-model]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!confirm("確定從這台機器移除這個模型？")) return;
+      try {
+        await request(`/api/nodes/${button.dataset.modelNode}/models/${button.dataset.removeModel}`, {
+          method: "DELETE",
+        });
+        await loadNodes();
+        showToast("模型已移除");
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+}
+
+const ENROLLMENT_STATE_LABELS = { pending: "待使用", used: "已使用", expired: "已過期" };
+
+function joinCommand(token) {
+  const server = window.location.origin;
+  return `swiftlm-node join ${token} \\\n  --server ${server} \\\n  --name "GPU 01" \\\n  --base-url https://gpu-01-origin.example/v1 \\\n  --model-id <model-id>`;
+}
+
+async function renderEnrollmentTokens(revealedToken) {
+  if (revealedToken) {
+    elements.enrollmentReveal.classList.remove("hidden");
+    elements.enrollmentReveal.innerHTML = `
+      <div><strong>請立即保存這個 Token</strong><p>10 分鐘內有效、只能使用一次；離開後不會再次顯示。</p></div>
+      <code>${escapeHtml(joinCommand(revealedToken))}</code>
+      <button class="primary" id="copyRevealedToken">複製指令</button>
+    `;
+    $("#copyRevealedToken").addEventListener("click", async () => {
+      await navigator.clipboard.writeText(joinCommand(revealedToken));
+      showToast("Join 指令已複製");
+    });
+  } else {
+    elements.enrollmentReveal.classList.add("hidden");
+    elements.enrollmentReveal.innerHTML = "";
+  }
+
+  elements.enrollmentList.innerHTML = '<div class="loading-row">正在載入 Enrollment Tokens…</div>';
+  try {
+    const result = await request("/api/enrollment-tokens");
+    elements.enrollmentList.innerHTML = result.data.length ? result.data.map((token) => `
+      <article class="key-row ${token.state !== "pending" ? "revoked" : ""}">
+        <div class="key-badge" aria-hidden="true"></div>
+        <div class="key-main">
+          <div class="key-title">
+            <strong>${escapeHtml(token.label || "（未命名）")}</strong>
+            <span class="state-label ${token.state === "pending" ? "active" : ""}">${escapeHtml(ENROLLMENT_STATE_LABELS[token.state] || token.state)}</span>
+          </div>
+          <p>建立於 ${formatDate(token.created_at)} · 到期 ${formatDate(token.expires_at)}${token.used_at ? ` · 已於 ${formatDate(token.used_at)} 使用` : ""}</p>
+        </div>
+        ${token.state === "pending" ? `<button class="danger-button" data-revoke-token="${token.id}">撤銷</button>` : ""}
+      </article>
+    `).join("") : '<div class="empty-list"><strong>尚未產生 Enrollment Token</strong><span>產生一個 token，讓新機器透過 join 指令自行註冊。</span></div>';
+
+    elements.enrollmentList.querySelectorAll("[data-revoke-token]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        if (!confirm("確定撤銷這個 Enrollment Token？")) return;
+        await request(`/api/enrollment-tokens/${button.dataset.revokeToken}`, { method: "DELETE" });
+        await renderEnrollmentTokens();
+        showToast("Enrollment Token 已撤銷");
+      });
+    });
+  } catch (error) {
+    elements.enrollmentList.innerHTML = `<div class="empty-list"><strong>無法載入 Enrollment Tokens</strong><span>${escapeHtml(error.message)}</span></div>`;
+  }
 }
 
 async function updateConversationTarget() {
@@ -720,7 +946,7 @@ async function updateConversationTarget() {
   try {
     state.current = await request(`/api/conversations/${state.current.id}/target`, {
       method: "PATCH",
-      body: JSON.stringify({ node_id: node.id, model_id: node.model_id }),
+      body: JSON.stringify({ node_id: node.id, model_id: elements.conversationModel.value }),
     });
     renderNodeOptions();
     updateConversationHeader();
@@ -774,6 +1000,19 @@ elements.conversationNode.addEventListener("change", async () => {
 });
 elements.conversationModel.addEventListener("change", updateConversationTarget);
 elements.refreshNodesButton.addEventListener("click", loadNodes);
+elements.createEnrollmentTokenForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const issued = await request("/api/enrollment-tokens", {
+      method: "POST",
+      body: JSON.stringify({ label: elements.enrollmentLabel.value }),
+    });
+    elements.createEnrollmentTokenForm.reset();
+    await renderEnrollmentTokens(issued.token);
+  } catch (error) {
+    showToast(error.message);
+  }
+});
 elements.createNodeForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
@@ -784,14 +1023,47 @@ elements.createNodeForm.addEventListener("submit", async (event) => {
         model_name: elements.nodeModelName.value,
         model_id: elements.nodeModelId.value,
         origin_base_url: elements.nodeOrigin.value,
-        upstream_api_key: elements.nodeUpstreamKey.value,
+        provider: elements.nodeProvider.value,
+        ...nodeAuthPayload(),
       }),
     });
     elements.createNodeForm.reset();
+    syncAuthFields();
     await loadNodes();
     showToast("機器已加入，正在檢查模型狀態");
   } catch (error) {
     showToast(error.message);
+  }
+});
+elements.nodeAuthType.addEventListener("change", syncAuthFields);
+elements.probeNodeButton.addEventListener("click", async () => {
+  if (!elements.nodeOrigin.value.trim()) {
+    showToast("請先輸入節點的 /v1 網址");
+    return;
+  }
+  elements.probeNodeButton.disabled = true;
+  try {
+    const auth = nodeAuthPayload();
+    // Probing is a read-only reachability check, so an endpoint that needs no
+    // credential can be identified before any auth strategy has been chosen.
+    const probe = await request("/api/nodes/probe", {
+      method: "POST",
+      body: JSON.stringify({
+        base_url: elements.nodeOrigin.value,
+        ...(auth.upstream_api_key ? auth : { auth_type: "none" }),
+      }),
+    });
+    elements.nodeProvider.value = probe.provider;
+    // The node already knows which model it serves, so the operator only has to
+    // confirm it instead of retyping an exact model ID.
+    const discovered = probe.models?.[0]?.id;
+    if (discovered && !elements.nodeModelId.value.trim()) elements.nodeModelId.value = discovered;
+    if (discovered && !elements.nodeModelName.value.trim()) elements.nodeModelName.value = discovered;
+    showToast(`偵測到 ${PROVIDER_LABELS[probe.provider] || probe.provider}，共 ${probe.models?.length || 0} 個模型`);
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    elements.probeNodeButton.disabled = false;
   }
 });
 elements.conversationSearch.addEventListener("input", () => {
@@ -816,4 +1088,5 @@ document.querySelectorAll("[data-view]").forEach((button) => {
   button.addEventListener("click", () => switchView(button.dataset.view));
 });
 
+syncAuthFields();
 bootstrap();

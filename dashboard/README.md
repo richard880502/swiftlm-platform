@@ -1,6 +1,6 @@
 # SwiftLM Dashboard
 
-Dashboard 是平台的公開 API gateway 與管理介面，部署在 Zeabur Tencent Tokyo。模型權重不在這個服務中；所有推理會經由 SwiftLM origin、Wonder Mesh 與 relay 回到本機 Mac。
+Dashboard 是平台的公開 API gateway 與管理介面，部署在 Zeabur Tencent Tokyo。模型權重不在這個服務中；推理一律經由 private transport 回到對應的節點機器——預設節點是透過 SwiftLM origin、Wonder Mesh 與 relay 連回本機 Mac。
 
 ## 功能
 
@@ -8,7 +8,7 @@ Dashboard 是平台的公開 API gateway 與管理介面，部署在 Zeabur Tenc
 - 建立、列出與撤銷綁定指定機器的客戶 API key。
 - OpenAI-compatible `/v1/models` 與 `/v1/chat/completions`。
 - 多輪網頁聊天；在第一則訊息前選擇機器與模型。
-- 模型機器頁面：每 5 秒確認每個 SwiftLM Origin 的模型在線狀態。
+- 模型機器頁面：每 5 秒確認每個節點的模型在線狀態，並可偵測節點的 inference backend。
 - API request、token、token/s、TTFT、排隊時間、延遲、機器、模型與內容 preview 紀錄。
 - SQLite 持久化，Zeabur volume 掛載於 `/data`。
 
@@ -55,13 +55,26 @@ https://richard-swiftlm-origin-7165.zeabur.app/v1
 
 第一台機器由 `UPSTREAM_BASE_URL`、`MODEL_ID` 與 `DEFAULT_NODE_*` 自動建立；舊有對話、Key 與 request history 會安全地遷移到這個預設節點。
 
-之後在 Dashboard 的「機器」加入其他 SwiftLM、vLLM 或任何 OpenAI 相容 Origin。每台機器目前代表一個活躍的模型服務，因此會有一個模型 ID；若同一部實體 Mac 要同時提供不同模型，請將每個獨立 service 以不同 Origin 登記為不同節點。
+之後在 Dashboard 的「機器」加入其他 SwiftLM、vLLM 或任何 OpenAI 相容 Origin。一台機器對應一個 `origin_base_url`（一個推理 process、一個 port），但可以在同一個節點卡片下用「+ 新增模型」註冊多個模型 ID——適合 vLLM 新版、Ollama、LM Studio 這類本身就能用 `model` 欄位切換模型的 backend。若同一部實體主機是用兩個不同 port 各跑一個獨立的推理 process，仍然要以不同 Origin 登記成兩個節點，各自發自己的 client key；細節見 [../docs/inference-nodes.md](../docs/inference-nodes.md)。
 
-新增節點時需要填入該服務的 `/v1` Origin URL 和**該節點自己的上游 API Key**。Dashboard 只在伺服器端使用這把金鑰，並以伺服器祕密加密後保存；節點列表、瀏覽器與 Dashboard 發給客戶的 API key 都不會取得它。這讓每台機器可以獨立輪替或撤銷上游金鑰。
+新增節點時需要填入該服務的 `/v1` URL、inference backend（`swiftlm` / `vllm` / `llamacpp` / `generic`）與驗證方式。「偵測 backend 與模型」會以一次 `/models` 請求判斷 backend 並帶出該節點已提供的模型。
 
-若額外節點更換上游 API Key，在「機器」列點選「更新 Key」即可直接替換，不需要刪除、重建節點或重發 Dashboard API Key。預設 Mac mini 的 key 仍由 Zeabur 環境設定管理。
+驗證方式有三種：`bearer`（該節點自己的上游 API Key）、`api_key_header`（自訂 header 名稱）與 `none`。上游 API Key 因此不再是必填欄位——只監聽私有網路、由 private transport 保護的節點（例如 `vllm serve --host 127.0.0.1`）可以選 `none`。有設定憑證時，Dashboard 只在伺服器端使用，並以伺服器祕密加密後保存；節點列表、瀏覽器與 Dashboard 發給客戶的 API key 都不會取得它。這讓每台機器可以獨立輪替或撤銷上游憑證。預設節點的 master key 只借給預設節點自己，不會被送到其他節點的 endpoint。
+
+若額外節點要更換憑證或改變驗證方式，在「機器」列點選「更新驗證」即可直接替換，不需要刪除、重建節點或重發 Dashboard API Key。預設 Mac mini 的 key 仍由 Zeabur 環境設定管理。
+
+不同 backend 的差異只影響上游請求，不影響 client：SwiftLM-specific 的 metrics header 與 `enable_thinking` 不會原樣送到 vLLM，而不支援的 metrics 在使用紀錄中是 `null`。細節見 [../docs/inference-nodes.md](../docs/inference-nodes.md)。
 
 預設機器不能刪除。其他機器可隨時刪除；Dashboard 會先列出影響範圍並要求確認。確認後，該節點的 Dashboard API Key、對話與使用紀錄會一併永久刪除。
+
+### 節點 Enrollment（讓節點自己註冊）
+
+手動加入節點時，Dashboard 相信管理員輸入的網址與憑證。Enrollment 是另一條路徑：在「機器」頁面按「產生 Token」取得一次性 token，節點端執行 `swiftlm-node join <token> ...`（目前是 `mlx-gateway/join.mjs`）即可自行完成註冊，取得只有這個節點知道的簽章身分（`node_secret`），之後：
+
+- 節點每 30 秒送一次簽章 heartbeat 回報 online 狀態與 capabilities。
+- Dashboard 對這個節點的每個請求都會附上同一把 secret 簽出的 Gateway-Identity 簽章，節點端驗證通過才會轉發到本機 backend——這樣即使有第三方知道節點的網路位址，沒有這把 secret 也無法直接使用 GPU。
+
+這個模式完全是 opt-in：沒有跑過 `join.mjs` 的既有節點（包含手動加入的節點）行為不受影響。細節與目前的限制（沒有 Ed25519/mTLS、沒有 outbound tunnel、沒有 secret 輪替）見 [../docs/inference-nodes.md](../docs/inference-nodes.md)。
 
 ## 停止生成
 

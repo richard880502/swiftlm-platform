@@ -159,5 +159,151 @@ test("an existing single-node database is migrated to the default node", () => {
   assert.equal(store.authenticateApiKey("legacy-digest").node_id, defaultNode.id);
   assert.equal(store.getConversation("legacy-conversation").node_id, defaultNode.id);
   assert.equal(store.listRequests()[0].node_id, defaultNode.id);
+  // A database written before backends were describable must keep behaving exactly
+  // as it did: SwiftLM over the OpenAI protocol with a bearer credential.
+  const migrated = store.getNode(defaultNode.id);
+  assert.equal(migrated.provider, "swiftlm");
+  assert.equal(migrated.protocol, "openai");
+  assert.equal(migrated.auth_type, "bearer");
+  assert.equal(migrated.auth_header, null);
+  assert.equal(store.authenticateApiKey("legacy-digest").provider, "swiftlm");
+  store.close();
+});
+
+test("a keyless vLLM node is storable and keeps no credential", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "swiftlm-dashboard-vllm-test-"));
+  const store = createStore(path.join(directory, "test.sqlite"), { defaultNode, nodeSecret });
+  const node = store.createNode({
+    id: "gpu-01",
+    name: "GPU 01",
+    originBaseUrl: "http://10.0.0.4:8000/v1",
+    modelId: "Qwen/Qwen3-32B",
+    modelName: "Qwen3 32B",
+    provider: "vllm",
+    protocol: "openai",
+    authType: "none",
+    upstreamApiKey: null,
+  });
+
+  assert.equal(node.provider, "vllm");
+  assert.equal(node.auth_type, "none");
+  assert.equal(store.getNodeForProxy("gpu-01").upstream_api_key, null);
+  store.createApiKey({
+    id: "key-vllm", name: "GPU Key", prefix: "sk-mlx-gpu…", digest: "digest-vllm", nodeId: "gpu-01",
+  });
+  // The proxy reads the backend descriptor straight off the authenticated key.
+  const authenticated = store.authenticateApiKey("digest-vllm");
+  assert.equal(authenticated.provider, "vllm");
+  assert.equal(authenticated.auth_type, "none");
+  assert.equal(authenticated.upstream_api_key, null);
+
+  // Switching an existing node to a header credential must not leave the old
+  // strategy behind, and switching back to "none" must clear the credential.
+  assert.equal(store.updateNodeAuth("gpu-01", {
+    authType: "api_key_header", authHeader: "X-Node-Key", upstreamApiKey: "node-secret",
+  }), true);
+  assert.equal(store.getNode("gpu-01").auth_type, "api_key_header");
+  assert.equal(store.getNode("gpu-01").auth_header, "X-Node-Key");
+  assert.equal(store.getNodeForProxy("gpu-01").upstream_api_key, "node-secret");
+  assert.equal(store.updateNodeAuth("gpu-01", { authType: "none" }), true);
+  assert.equal(store.getNodeForProxy("gpu-01").upstream_api_key, null);
+  store.close();
+});
+
+test("creating a node registers its own model, and more models can be added", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "swiftlm-dashboard-nodemodels-test-"));
+  const store = createStore(path.join(directory, "test.sqlite"), { defaultNode, nodeSecret });
+  const node = store.createNode({
+    id: "gpu-01", name: "GPU 01", originBaseUrl: "http://10.0.0.4:8000/v1",
+    modelId: "Qwen/Qwen3-32B", modelName: "Qwen3 32B",
+  });
+
+  const initial = store.listNodeModels(node.id);
+  assert.equal(initial.length, 1);
+  assert.equal(initial[0].model_id, "Qwen/Qwen3-32B");
+  assert.equal(initial[0].enabled, 1);
+  assert.equal(store.isModelAllowedOnNode(node.id, "Qwen/Qwen3-32B"), true);
+  assert.equal(store.isModelAllowedOnNode(node.id, "Qwen/Qwen3-14B"), false);
+
+  const afterAdd = store.addNodeModel(node.id, { modelId: "Qwen/Qwen3-14B", modelName: "Qwen3 14B" });
+  assert.equal(afterAdd.length, 2);
+  assert.equal(store.isModelAllowedOnNode(node.id, "Qwen/Qwen3-14B"), true);
+
+  // The same model can't be registered twice on one node.
+  assert.throws(() => store.addNodeModel(node.id, { modelId: "Qwen/Qwen3-14B", modelName: "dup" }));
+
+  const secondModelRow = afterAdd.find((model) => model.model_id === "Qwen/Qwen3-14B");
+  assert.equal(store.setNodeModelEnabled(node.id, secondModelRow.id, false), true);
+  assert.equal(store.isModelAllowedOnNode(node.id, "Qwen/Qwen3-14B"), false, "a disabled model is no longer allowed");
+  assert.equal(store.listNodeModels(node.id).find((m) => m.id === secondModelRow.id).enabled, 0);
+
+  // A node can never be left with zero registered models -- disabled rows still
+  // count, so the operator is pushed toward deleting the whole node instead.
+  const primaryRow = store.listNodeModels(node.id).find((model) => model.model_id === "Qwen/Qwen3-32B");
+  const removed = store.deleteNodeModel(node.id, primaryRow.id);
+  assert.equal(removed.ok, true, "removing the primary is fine as long as another row remains");
+  const lastRemaining = store.listNodeModels(node.id)[0];
+  const blocked = store.deleteNodeModel(node.id, lastRemaining.id);
+  assert.deepEqual(blocked, { ok: false, reason: "last_model" });
+  assert.equal(store.listNodeModels(node.id).length, 1);
+
+  assert.deepEqual(store.deleteNodeModel(node.id, "does-not-exist"), { ok: false, reason: "not_found" });
+  store.close();
+});
+
+test("deleting a node cascades its registered models", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "swiftlm-dashboard-nodemodels-cascade-test-"));
+  const store = createStore(path.join(directory, "test.sqlite"), { defaultNode, nodeSecret });
+  const node = store.createNode({
+    id: "gpu-02", name: "GPU 02", originBaseUrl: "http://10.0.0.5:8000/v1",
+    modelId: "model-a", modelName: "Model A",
+  });
+  store.addNodeModel(node.id, { modelId: "model-b", modelName: "Model B" });
+  assert.equal(store.listNodeModels(node.id).length, 2);
+
+  assert.equal(store.deleteNode(node.id, { purge: true }), true);
+  assert.equal(store.listNodeModels(node.id).length, 0);
+  store.close();
+});
+
+test("a database written before node_models existed is backfilled with each node's primary model", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "swiftlm-dashboard-nodemodels-migration-test-"));
+  const database = path.join(directory, "legacy.sqlite");
+  const legacy = new DatabaseSync(database);
+  legacy.exec(`
+    CREATE TABLE nodes (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, origin_base_url TEXT NOT NULL UNIQUE,
+      model_id TEXT NOT NULL, model_name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE api_keys (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, prefix TEXT NOT NULL, digest TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL, last_used_at TEXT, revoked_at TEXT
+    );
+    CREATE TABLE conversations (
+      id TEXT PRIMARY KEY, title TEXT NOT NULL, system_prompt TEXT NOT NULL,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE messages (
+      id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, role TEXT NOT NULL,
+      content TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE api_requests (
+      id TEXT PRIMARY KEY, api_key_id TEXT, route TEXT NOT NULL, model TEXT, status INTEGER NOT NULL,
+      latency_ms INTEGER NOT NULL, prompt_tokens INTEGER, completion_tokens INTEGER,
+      request_preview TEXT, response_preview TEXT, created_at TEXT NOT NULL
+    );
+    INSERT INTO nodes VALUES ('legacy-node', 'Legacy Node', 'https://legacy.example/v1', 'legacy-model', 'Legacy Model', 1, '2026-01-01', '2026-01-01');
+  `);
+  legacy.close();
+
+  const store = createStore(database, { defaultNode, nodeSecret });
+  const models = store.listNodeModels("legacy-node");
+  assert.equal(models.length, 1);
+  assert.equal(models[0].model_id, "legacy-model");
+  assert.equal(models[0].model_name, "Legacy Model");
+  assert.equal(store.isModelAllowedOnNode("legacy-node", "legacy-model"), true);
+  // The default node created fresh by this same store instance is backfilled too.
+  assert.equal(store.isModelAllowedOnNode(defaultNode.id, defaultNode.modelId), true);
   store.close();
 });

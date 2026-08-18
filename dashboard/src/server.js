@@ -12,7 +12,34 @@ import {
 } from "./auth.js";
 import { loadConfig } from "./config.js";
 import { createStore } from "./db.js";
-import { preview, proxyOpenAI, streamDashboardChat, upstreamJson } from "./proxy.js";
+import {
+  preview,
+  proxyOpenAI,
+  resolveCredential,
+  streamDashboardChat,
+  upstreamJson,
+} from "./proxy.js";
+import {
+  DEFAULT_PROTOCOL,
+  DEFAULT_PROVIDER,
+  authRequiresCredential,
+  buildAuthHeaders,
+  capabilitiesFor,
+  detectProvider,
+  isSupportedAuthType,
+  isSupportedProtocol,
+  isSupportedProvider,
+  providerCatalog,
+} from "./providers.js";
+import {
+  createNonceCache,
+  digest as sha256Hex,
+  ENROLLMENT_TOKEN_PREFIX,
+  generateEnrollmentToken,
+  generateNodeSecret,
+  parseSignatureHeaders,
+  verify as verifySignature,
+} from "./nodeAuth.js";
 
 const config = loadConfig();
 const store = createStore(config.databasePath, {
@@ -26,6 +53,10 @@ const loginAttempts = new Map();
 // Keep cancellation handles server-side. A browser disconnect intentionally does not
 // abort generation, but an explicit stop action must cancel the upstream stream.
 const activeGenerations = new Map();
+// Bounds replay for Node Identity heartbeats. Scoped to this process: a dashboard
+// restart re-widens the window briefly, which is an acceptable MVP trade-off since
+// the timestamp window alone still bounds it.
+const heartbeatNonceCache = createNonceCache();
 
 app.set("trust proxy", 1);
 app.disable("x-powered-by");
@@ -91,12 +122,42 @@ function normalizedOrigin(value) {
   try {
     const url = new URL(String(value || "").trim());
     if (!["https:", "http:"].includes(url.protocol) || !url.hostname) return "";
+    // A node agent may mount its OpenAI surface under a prefix, so any path is
+    // accepted as long as it ends at the `/v1` root the adapter appends routes to.
     const pathname = url.pathname.replace(/\/+$/, "");
-    if (pathname !== "/v1") return "";
+    if (!pathname.endsWith("/v1")) return "";
     return url.toString().replace(/\/$/, "");
   } catch {
     return "";
   }
+}
+
+function safeHeaderName(value) {
+  const name = String(value || "").trim();
+  return /^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/.test(name) ? name : "";
+}
+
+// Auth style and credential are validated together: a credential is required only
+// when the chosen strategy actually uses one, which is what makes a keyless private
+// node such as vLLM behind a node agent expressible at all.
+function parseAuthInput(body, { defaultAuthType = "bearer" } = {}) {
+  const authType = String(body?.auth_type || defaultAuthType).trim();
+  const credential = String(body?.upstream_api_key || "").trim();
+  const authHeader = body?.auth_header ? safeHeaderName(body.auth_header) : null;
+  if (!isSupportedAuthType(authType)) {
+    return { error: "驗證方式必須是 none、bearer 或 api_key_header（mTLS 尚未支援）。" };
+  }
+  if (authType === "api_key_header" && body?.auth_header && !authHeader) {
+    return { error: "API Key header 名稱只能包含英數字與連字號。" };
+  }
+  if (authRequiresCredential(authType) && !credential) {
+    return { error: "這個驗證方式需要一組上游憑證。" };
+  }
+  return {
+    authType,
+    authHeader: authType === "api_key_header" ? authHeader : null,
+    credential: authType === "none" ? null : credential,
+  };
 }
 
 async function checkNode(node) {
@@ -106,7 +167,13 @@ async function checkNode(node) {
   }
   try {
     const proxyNode = store.getNodeForProxy(node.id);
-    if (!proxyNode?.upstream_api_key) throw new Error("Node API key is unavailable");
+    if (!proxyNode) throw new Error("Node is unavailable");
+    // Only a strategy that uses a credential needs one present. A private node
+    // reachable over Wonder Mesh with auth_type "none" is checked unauthenticated.
+    if (authRequiresCredential(proxyNode.auth_type)
+      && !resolveCredential(config, proxyNode).credential) {
+      throw new Error("Node credential is unavailable");
+    }
     const upstream = await upstreamJson(config, proxyNode, "/models", undefined, {
       signal: AbortSignal.timeout(5_000),
     });
@@ -131,9 +198,11 @@ async function checkNode(node) {
 async function nodeWithStatus(node) {
   return {
     ...node,
+    capabilities: capabilitiesFor(node),
     is_default: node.id === config.defaultNode.id,
     usage: store.getNodeUsage(node.id),
     status: await checkNode(node),
+    models: store.listNodeModels(node.id),
   };
 }
 
@@ -144,7 +213,11 @@ function resolveEnabledNode(nodeId) {
 
 function resolveEnabledProxyNode(nodeId) {
   const node = store.getNodeForProxy(nodeId);
-  return node?.enabled && node.upstream_api_key ? node : null;
+  if (!node?.enabled) return null;
+  if (authRequiresCredential(node.auth_type) && !resolveCredential(config, node).credential) {
+    return null;
+  }
+  return node;
 }
 
 app.get("/health", (_req, res) => {
@@ -193,20 +266,90 @@ app.get("/api/nodes", requireAdmin, async (_req, res) => {
   res.json({ data: await Promise.all(nodes.map(nodeWithStatus)) });
 });
 
+app.get("/api/providers", requireAdmin, (_req, res) => {
+  res.json({ data: providerCatalog(), protocols: [DEFAULT_PROTOCOL] });
+});
+
+// Backend detection before a node is created: one authenticated `/models` probe
+// identifies the runtime and lists the models it already serves.
+app.post("/api/nodes/probe", requireAdmin, async (req, res) => {
+  const baseUrl = normalizedOrigin(req.body?.base_url);
+  if (!baseUrl) {
+    return res.status(400).json({ error: { message: "請輸入以 /v1 結尾的節點網址" } });
+  }
+  const auth = parseAuthInput(req.body, { defaultAuthType: "none" });
+  if (auth.error) return res.status(400).json({ error: { message: auth.error } });
+  try {
+    const upstream = await fetch(`${baseUrl}/models`, {
+      headers: buildAuthHeaders(auth),
+      signal: AbortSignal.timeout(5_000),
+    });
+    const text = await upstream.text();
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+    if (!upstream.ok) {
+      return res.status(502).json({
+        error: { message: `節點回應 HTTP ${upstream.status}；請確認網址與驗證方式。` },
+      });
+    }
+    const models = Array.isArray(parsed?.data) ? parsed.data : [];
+    const detected = detectProvider({ headers: upstream.headers, models });
+    return res.json({
+      ...detected,
+      protocol: DEFAULT_PROTOCOL,
+      capabilities: capabilitiesFor({ provider: detected.provider }),
+      models: models.slice(0, 50).map((model) => ({
+        id: String(model?.id || ""),
+        owned_by: model?.owned_by ?? null,
+        max_model_len: model?.max_model_len ?? null,
+      })).filter((model) => model.id),
+    });
+  } catch (error) {
+    return res.status(502).json({
+      error: { message: `無法連線到節點：${error.message}` },
+    });
+  }
+});
+
 app.post("/api/nodes", requireAdmin, (req, res) => {
   const name = String(req.body?.name || "").trim().slice(0, 80);
   const modelId = String(req.body?.model_id || "").trim().slice(0, 240);
   const modelName = String(req.body?.model_name || modelId).trim().slice(0, 120);
   const originBaseUrl = normalizedOrigin(req.body?.origin_base_url);
-  const upstreamApiKey = String(req.body?.upstream_api_key || "").trim();
-  if (!name || !modelId || !modelName || !originBaseUrl || !upstreamApiKey) {
-    return res.status(400).json({ error: { message: "請填入機器名稱、模型、以 /v1 結尾的 Origin URL 與該機器的 API Key" } });
+  const provider = String(req.body?.provider || DEFAULT_PROVIDER).trim().toLowerCase();
+  const protocol = String(req.body?.protocol || DEFAULT_PROTOCOL).trim().toLowerCase();
+  if (!name || !modelId || !modelName || !originBaseUrl) {
+    return res.status(400).json({ error: { message: "請填入機器名稱、模型與以 /v1 結尾的節點網址" } });
   }
+  if (!isSupportedProvider(provider)) {
+    return res.status(400).json({ error: { message: "不支援這個 backend；可選 swiftlm、vllm、llamacpp 或 generic。" } });
+  }
+  if (!isSupportedProtocol(protocol)) {
+    return res.status(400).json({ error: { message: "目前只支援 OpenAI-compatible protocol。" } });
+  }
+  // Existing callers post only a key, so bearer stays the default and their nodes
+  // behave exactly as before.
+  const auth = parseAuthInput(req.body, { defaultAuthType: "bearer" });
+  if (auth.error) return res.status(400).json({ error: { message: auth.error } });
   try {
-    const node = store.createNode({ name, modelId, modelName, originBaseUrl, upstreamApiKey });
-    return res.status(201).json(node);
+    const node = store.createNode({
+      name,
+      modelId,
+      modelName,
+      originBaseUrl,
+      provider,
+      protocol,
+      authType: auth.authType,
+      authHeader: auth.authHeader,
+      upstreamApiKey: auth.credential,
+    });
+    return res.status(201).json({ ...node, capabilities: capabilitiesFor(node) });
   } catch (error) {
-    return res.status(409).json({ error: { message: error.message.includes("UNIQUE") ? "這個 Origin URL 已存在" : "無法建立節點" } });
+    return res.status(409).json({ error: { message: error.message.includes("UNIQUE") ? "這個節點網址已存在" : "無法建立節點" } });
   }
 });
 
@@ -222,21 +365,28 @@ app.post("/api/nodes/:id/enabled", requireAdmin, (req, res) => {
   return res.json(store.getNode(id));
 });
 
-app.patch("/api/nodes/:id/upstream-key", requireAdmin, (req, res) => {
+function updateNodeAuth(req, res) {
   const id = safeNodeId(req.params.id);
   if (id === config.defaultNode.id) {
     return res.status(400).json({
-      error: { message: "預設機器的上游 Key 由 Zeabur 環境設定管理，無法在此修改。" },
+      error: { message: "預設機器的上游憑證由 Zeabur 環境設定管理，無法在此修改。" },
     });
   }
-  if (!store.getNode(id)) return res.status(404).json({ error: { message: "Node not found" } });
-  const upstreamApiKey = String(req.body?.upstream_api_key || "").trim();
-  if (!upstreamApiKey) {
-    return res.status(400).json({ error: { message: "請輸入新的上游 API Key" } });
-  }
-  store.updateNodeUpstreamKey(id, upstreamApiKey);
+  const existing = store.getNode(id);
+  if (!existing) return res.status(404).json({ error: { message: "Node not found" } });
+  const auth = parseAuthInput(req.body, { defaultAuthType: existing.auth_type || "bearer" });
+  if (auth.error) return res.status(400).json({ error: { message: auth.error } });
+  store.updateNodeAuth(id, {
+    authType: auth.authType,
+    authHeader: auth.authHeader,
+    upstreamApiKey: auth.credential,
+  });
   return res.json({ ok: true, node: store.getNode(id) });
-});
+}
+
+app.patch("/api/nodes/:id/auth", requireAdmin, updateNodeAuth);
+// Kept so an existing dashboard build can still rotate a bearer credential.
+app.patch("/api/nodes/:id/upstream-key", requireAdmin, updateNodeAuth);
 
 app.delete("/api/nodes/:id", requireAdmin, (req, res) => {
   const id = safeNodeId(req.params.id);
@@ -258,6 +408,176 @@ app.delete("/api/nodes/:id", requireAdmin, (req, res) => {
   return res.status(deleted ? 200 : 409).json(deleted
     ? { ok: true, purged: usage }
     : { error: { message: "無法刪除這台機器" } });
+});
+
+// A node's model set only makes sense for a backend that natively multiplexes
+// several models behind the one endpoint it already has (vLLM, Ollama, LM
+// Studio, ...) -- a second physical port is a second node, not a second entry
+// here. See docs/inference-nodes.md.
+app.get("/api/nodes/:id/models", requireAdmin, (req, res) => {
+  const id = safeNodeId(req.params.id);
+  if (!store.getNode(id)) return res.status(404).json({ error: { message: "Node not found" } });
+  res.json({ data: store.listNodeModels(id) });
+});
+
+app.post("/api/nodes/:id/models", requireAdmin, (req, res) => {
+  const id = safeNodeId(req.params.id);
+  if (!store.getNode(id)) return res.status(404).json({ error: { message: "Node not found" } });
+  const modelId = String(req.body?.model_id || "").trim().slice(0, 240);
+  const modelName = String(req.body?.model_name || modelId).trim().slice(0, 120);
+  if (!modelId) return res.status(400).json({ error: { message: "請輸入模型 ID" } });
+  try {
+    const models = store.addNodeModel(id, { modelId, modelName });
+    return res.status(201).json({ data: models });
+  } catch (error) {
+    return res.status(409).json({
+      error: { message: error.message.includes("UNIQUE") ? "這個模型已經在這台機器上" : "無法新增模型" },
+    });
+  }
+});
+
+app.patch("/api/nodes/:id/models/:modelRowId/enabled", requireAdmin, (req, res) => {
+  const id = safeNodeId(req.params.id);
+  if (!store.getNode(id)) return res.status(404).json({ error: { message: "Node not found" } });
+  const enabled = Boolean(req.body?.enabled);
+  const updated = store.setNodeModelEnabled(id, req.params.modelRowId, enabled);
+  return res.status(updated ? 200 : 404).json(updated
+    ? { data: store.listNodeModels(id) }
+    : { error: { message: "Model not found" } });
+});
+
+app.delete("/api/nodes/:id/models/:modelRowId", requireAdmin, (req, res) => {
+  const id = safeNodeId(req.params.id);
+  if (!store.getNode(id)) return res.status(404).json({ error: { message: "Node not found" } });
+  const result = store.deleteNodeModel(id, req.params.modelRowId);
+  if (!result.ok) {
+    return res.status(result.reason === "last_model" ? 409 : 404).json({
+      error: {
+        message: result.reason === "last_model"
+          ? "機器至少要保留一個模型；請改為刪除整台機器。"
+          : "Model not found",
+      },
+    });
+  }
+  return res.json({ data: store.listNodeModels(id) });
+});
+
+function enrollmentTokenState(token) {
+  if (token.used_at) return "used";
+  if (Date.parse(token.expires_at) <= Date.now()) return "expired";
+  return "pending";
+}
+
+// Enrollment tokens are the credential that lets a node agent register itself: the
+// admin generates one out of band and hands it to whoever is bringing up the new
+// machine, matching the `swiftlm-node join <token>` UX the platform is aiming for.
+app.get("/api/enrollment-tokens", requireAdmin, (_req, res) => {
+  store.pruneExpiredEnrollmentTokens();
+  res.json({ data: store.listEnrollmentTokens().map((token) => ({ ...token, state: enrollmentTokenState(token) })) });
+});
+
+app.post("/api/enrollment-tokens", requireAdmin, (req, res) => {
+  store.pruneExpiredEnrollmentTokens();
+  const label = String(req.body?.label || "").trim().slice(0, 80) || null;
+  const ttlMinutes = Math.min(Math.max(Number(req.body?.ttl_minutes) || 10, 1), 60);
+  const rawToken = generateEnrollmentToken();
+  const created = store.createEnrollmentToken({
+    tokenDigest: sha256Hex(rawToken), label, ttlMs: ttlMinutes * 60_000,
+  });
+  // The raw token is returned exactly once, like an issued client API key; only
+  // its digest is ever persisted from this point on.
+  res.status(201).json({ ...created, token: rawToken, state: "pending", warning: "This token is shown only once." });
+});
+
+app.delete("/api/enrollment-tokens/:id", requireAdmin, (req, res) => {
+  const deleted = store.deleteEnrollmentToken(req.params.id);
+  res.status(deleted ? 200 : 404).json({ ok: deleted });
+});
+
+// Node-agent facing endpoints. These are intentionally not behind requireAdmin:
+// the enrollment token and, after enrollment, the node's own HMAC signature are
+// the credentials here, exactly as Client API Key and Node Identity are separate
+// credential channels from the admin session.
+app.post("/api/node-agent/enroll", async (req, res) => {
+  store.pruneExpiredEnrollmentTokens();
+  const rawToken = String(req.body?.token || "").trim();
+  if (!rawToken.startsWith(ENROLLMENT_TOKEN_PREFIX)) {
+    return res.status(400).json({ error: { message: "缺少或格式錯誤的 enrollment token" } });
+  }
+  const tokenDigest = sha256Hex(rawToken);
+  const existing = store.peekEnrollmentToken(tokenDigest);
+  if (!existing) return res.status(401).json({ error: { message: "Enrollment token 不存在或已被撤銷" } });
+  if (existing.used_at) return res.status(409).json({ error: { message: "Enrollment token 已被使用過" } });
+  if (Date.parse(existing.expires_at) <= Date.now()) {
+    return res.status(410).json({ error: { message: "Enrollment token 已過期" } });
+  }
+
+  const name = String(req.body?.name || "").trim().slice(0, 80);
+  const modelId = String(req.body?.model_id || "").trim().slice(0, 240);
+  const modelName = String(req.body?.model_name || modelId).trim().slice(0, 120);
+  const originBaseUrl = normalizedOrigin(req.body?.base_url);
+  const provider = String(req.body?.provider || DEFAULT_PROVIDER).trim().toLowerCase();
+  const protocol = String(req.body?.protocol || DEFAULT_PROTOCOL).trim().toLowerCase();
+  if (!name || !modelId || !modelName || !originBaseUrl) {
+    return res.status(400).json({ error: { message: "請提供機器名稱、模型與以 /v1 結尾的節點網址" } });
+  }
+  if (!isSupportedProvider(provider)) {
+    return res.status(400).json({ error: { message: "不支援這個 backend" } });
+  }
+  if (!isSupportedProtocol(protocol)) {
+    return res.status(400).json({ error: { message: "目前只支援 OpenAI-compatible protocol" } });
+  }
+  // An enrolled node defaults to auth_type "none": the Gateway-Identity signature
+  // this endpoint sets up is the intended protection, not a bearer key to the
+  // local backend. The operator can still layer a backend credential on top.
+  const auth = parseAuthInput(req.body, { defaultAuthType: "none" });
+  if (auth.error) return res.status(400).json({ error: { message: auth.error } });
+
+  let node;
+  try {
+    node = store.createNode({
+      name, modelId, modelName, originBaseUrl, provider, protocol,
+      authType: auth.authType, authHeader: auth.authHeader, upstreamApiKey: auth.credential,
+    });
+  } catch (error) {
+    return res.status(409).json({ error: { message: error.message.includes("UNIQUE") ? "這個節點網址已存在" : "無法建立節點" } });
+  }
+
+  const nodeSecret = generateNodeSecret();
+  store.setNodeSecret(node.id, nodeSecret);
+  // Claimed after the node exists so a lost race here just leaves an inert,
+  // never-enrolled node behind instead of a token that vanished with nothing to
+  // show for it; self-heal by removing that orphan immediately.
+  if (!store.consumeEnrollmentToken(tokenDigest, node.id)) {
+    store.deleteNode(node.id, { purge: true });
+    return res.status(409).json({ error: { message: "Enrollment token 已被使用過或已過期" } });
+  }
+
+  return res.status(201).json({ node_id: node.id, node_secret: nodeSecret, warning: "node_secret is shown only once." });
+});
+
+app.post("/api/node-agent/:id/heartbeat", (req, res) => {
+  const nodeId = safeNodeId(req.params.id);
+  const node = store.getNodeForProxy(nodeId);
+  if (!node || !node.node_secret) {
+    return res.status(404).json({ error: { message: "Node not found or not enrolled" } });
+  }
+  const { nodeId: claimedNodeId, timestamp, nonce, signature } = parseSignatureHeaders(req.headers);
+  if (claimedNodeId !== nodeId) {
+    return res.status(401).json({ error: { message: "Signature does not match this node" } });
+  }
+  const verified = verifySignature({
+    secret: node.node_secret, method: req.method, path: req.path, nodeId,
+    body: req.body, timestamp, nonce, signature, nonceCache: heartbeatNonceCache,
+  });
+  if (!verified.ok) {
+    return res.status(401).json({ error: { message: `Invalid heartbeat signature (${verified.reason})` } });
+  }
+  store.recordHeartbeat(nodeId, {
+    agentVersion: req.body?.agent_version,
+    capabilities: req.body?.capabilities,
+  });
+  return res.json({ ok: true });
 });
 
 app.get("/api/keys", requireAdmin, (_req, res) => res.json({ data: store.listApiKeys() }));
@@ -301,7 +621,7 @@ app.post("/api/conversations", requireAdmin, (req, res) => {
   const node = resolveEnabledNode(nodeId);
   if (!node) return res.status(400).json({ error: { message: "請選擇一台可用的機器" } });
   const modelId = String(req.body?.model_id || node.model_id).trim();
-  if (modelId !== node.model_id) {
+  if (!store.isModelAllowedOnNode(node.id, modelId)) {
     return res.status(400).json({ error: { message: "這台機器未提供指定模型" } });
   }
   const conversation = store.createConversation({
@@ -324,7 +644,7 @@ app.patch("/api/conversations/:id/target", requireAdmin, (req, res) => {
   const nodeId = safeNodeId(req.body?.node_id);
   const node = resolveEnabledNode(nodeId);
   const modelId = String(req.body?.model_id || "").trim();
-  if (!node || modelId !== node.model_id) {
+  if (!node || !modelId || !store.isModelAllowedOnNode(node.id, modelId)) {
     return res.status(400).json({ error: { message: "機器或模型無法使用" } });
   }
   store.updateConversationTarget(conversation.id, node.id, modelId);
@@ -364,7 +684,7 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
   if (content.length > 200_000) return res.status(413).json({ error: { message: "Message too large" } });
   const node = resolveEnabledNode(conversation.node_id);
   const proxyNode = resolveEnabledProxyNode(conversation.node_id);
-  if (!node || !proxyNode || conversation.model_id !== node.model_id) {
+  if (!node || !proxyNode || !store.isModelAllowedOnNode(node.id, conversation.model_id)) {
     return res.status(503).json({ error: { message: "這台機器或模型目前無法使用" } });
   }
 
@@ -377,7 +697,7 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
     }
     const updated = store.getConversation(conversation.id);
     const requestBody = {
-      model: node.model_id,
+      model: conversation.model_id,
       messages: [
         { role: "system", content: updated.system_prompt },
         ...updated.messages.map(({ role, content: messageContent }) => ({ role, content: messageContent })),
@@ -405,9 +725,11 @@ app.post("/api/conversations/:id/messages", requireAdmin, async (req, res) => {
         store.recordRequest({
           route: "/api/conversations/:id/messages",
           nodeId: node.id,
-          model: node.model_id,
+          model: conversation.model_id,
           status: cancelled ? 499 : completed ? 200 : 502,
           latencyMs: Date.now() - started,
+          // The adapter already merged provider metrics with stream-observed usage,
+          // so unsupported values arrive as null rather than being missing.
           promptTokens: metrics?.prompt_tokens ?? usage?.prompt_tokens,
           completionTokens: metrics?.completion_tokens ?? usage?.completion_tokens,
           queueMs: metrics?.queue_ms,

@@ -44,7 +44,7 @@ Client API 使用 Dashboard 產生的 `sk-mlx-...` key。Origin 只供 Dashboard
 - `mlx`：唯一管理指令。
 - `common.sh`：共用設定與模型路徑解析。
 - `swiftlm-runtime/`：SwiftLM binary 與 Metal runtime。
-- `mlx-gateway/`：統一入口、推理佇列、request ID 與結構化效能紀錄。
+- `mlx-gateway/`：統一入口、推理佇列、request ID 與結構化效能紀錄。可選擇性啟用 node-agent 模式（enrollment、簽章 heartbeat），見 `mlx-gateway/join.mjs` 與 [docs/inference-nodes.md](docs/inference-nodes.md)；未啟用時行為完全不變。
 - `dashboard/`：Zeabur Dashboard、API gateway、聊天及 request history。
 - `deploy/wondermesh/`：Wonder Mesh relay 部署檔。
 - `.state/`：PID 與後台日誌。
@@ -75,21 +75,25 @@ Dashboard 的開發與部署方式請見 [dashboard/README.md](dashboard/README.
 
 ## 多機器 Dashboard
 
-Dashboard 把每一台已透過 Wonder Mesh 發布的 SwiftLM 視為一個「機器節點」。節點是明確選擇的，不做隱性自動分流：
+Dashboard 把每一台推理節點視為一個「機器節點」，不限於 SwiftLM：Apple Silicon + SwiftLM、Linux/NVIDIA + vLLM、llama.cpp 與其他 OpenAI-compatible backend 可以並存。節點是明確選擇的，不做隱性自動分流：
 
 ```mermaid
 flowchart LR
     Client["使用者／應用程式"] -->|"Node 專用 Dashboard API Key"| Dashboard["SwiftLM Dashboard\n驗證、聊天、紀錄"]
-    Dashboard -->|"Node A 專屬上游 API Key"| OriginA["Node A Origin"]
-    Dashboard -->|"Node B 專屬上游 API Key"| OriginB["Node B Origin"]
-    OriginA --> GatewayA["Mac A MLX Gateway"] --> SwiftA["SwiftLM A"]
-    OriginB --> GatewayB["Mac B MLX Gateway"] --> SwiftB["SwiftLM B"]
+    Dashboard -->|"OpenAI protocol adapter"| OriginA["Node A"]
+    Dashboard -->|"OpenAI protocol adapter"| OriginB["Node B"]
+    OriginA --> GatewayA["MLX Gateway"] --> SwiftA["SwiftLM（Apple Silicon）"]
+    OriginB --> vLLM["vLLM（NVIDIA）"]
 ```
 
-- 管理員在 Dashboard 的「機器」加入一台機器名稱、模型、專屬 Origin `/v1` URL 與該節點自己的上游 API Key。
-- Dashboard 每 5 秒以 authenticated `/models` 檢查各節點是否在線；模型仍實際執行於本機。
-- 建立 API Key 時必須選擇機器；Key 只能呼叫該機器登記的模型。
+- 管理員在 Dashboard 的「機器」加入機器名稱、backend、模型、節點 `/v1` URL 與驗證方式。「偵測 backend 與模型」會以一次 `/models` 請求判斷 backend 並帶出該節點已提供的模型。
+- Dashboard 每 5 秒以 `/models` 檢查各節點是否在線；驗證方式為「無驗證」的私有節點不需要上游 API Key。
+- 建立 API Key 時必須選擇機器；Key 只能呼叫該機器登記的模型。Client 只使用 Dashboard 發行的 `sk-mlx-*` key，不需要知道背後是哪一種 backend。
 - 新對話可在尚未送出第一則訊息前選擇機器和模型；送出後固定目標，避免對話內容跨機器混用。
 - API request 與對話會保存 `node_id`、模型與狀態，方便從使用紀錄追查。
 
-上游 API Key 不會顯示給 Dashboard 使用者；預設 Mac mini 的 key 仍位於 Keychain 與 Dashboard 的 Zeabur secret environment variable，額外節點的 key 則只會加密保存於 Dashboard 的持久化資料庫。
+上游憑證不會顯示給 Dashboard 使用者；預設 Mac mini 的 key 仍位於 Keychain 與 Dashboard 的 Zeabur secret environment variable，額外節點的憑證則只會加密保存於 Dashboard 的持久化資料庫，且預設節點的 master key 不會被借給任何其他節點。
+
+各 backend 的差異（metrics、thinking switch、驗證方式）與節點資料模型請見：
+
+[異質推理節點與 provider adapter](docs/inference-nodes.md)

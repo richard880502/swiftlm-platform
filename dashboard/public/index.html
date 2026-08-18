@@ -193,14 +193,44 @@
             <div id="nodeList" class="node-list" tabindex="0" aria-label="模型機器清單"></div>
           </div>
           <div class="content-card">
-            <div class="content-card-header"><div><h3>加入機器</h3><p>填入該機器的 Zeabur Origin `/v1` 網址與它自己的 API Key。金鑰只會在 Dashboard 伺服器端加密保存。</p></div></div>
+            <div id="enrollmentReveal" class="key-reveal hidden"></div>
+            <div class="content-card-header keys-header">
+              <div><h3>節點 Enrollment</h3><p>產生一次性 token，讓 <code>swiftlm-node join</code> 自動註冊節點並取得簽章身分，不需要手動維護每台機器的憑證。</p></div>
+              <form id="createEnrollmentTokenForm" class="key-create-form">
+                <input id="enrollmentLabel" placeholder="標籤（選填，例如 GPU 01）" maxlength="80" />
+                <button class="primary" type="submit">產生 Token</button>
+              </form>
+            </div>
+            <div id="enrollmentList" class="key-list"></div>
+          </div>
+          <div class="content-card">
+            <div class="content-card-header"><div><h3>加入機器</h3><p>填入該機器的 `/v1` 網址與它的驗證方式。私有網路節點可以選「無驗證」；憑證只會在 Dashboard 伺服器端加密保存。</p></div></div>
             <form id="createNodeForm" class="node-create-form">
-              <label>機器名稱<input id="nodeName" placeholder="例如 Mac Studio" maxlength="80" required /></label>
+              <label>機器名稱<input id="nodeName" placeholder="例如 Mac Studio 或 GPU-01" maxlength="80" required /></label>
+              <label>Inference backend
+                <select id="nodeProvider">
+                  <option value="swiftlm">SwiftLM（Apple Silicon）</option>
+                  <option value="vllm">vLLM（NVIDIA / CPU）</option>
+                  <option value="llamacpp">llama.cpp</option>
+                  <option value="generic">其他 OpenAI-compatible</option>
+                </select>
+              </label>
+              <label>節點 /v1 網址<input id="nodeOrigin" type="url" placeholder="https://node-origin.zeabur.app/v1" required /></label>
+              <label>驗證方式
+                <select id="nodeAuthType">
+                  <option value="bearer">Bearer API Key</option>
+                  <option value="none">無驗證（私有網路節點）</option>
+                  <option value="api_key_header">自訂 API Key header</option>
+                </select>
+              </label>
+              <label>上游憑證<input id="nodeUpstreamKey" type="password" placeholder="貼上該服務的 API Key" autocomplete="new-password" /></label>
+              <label>Header 名稱<input id="nodeAuthHeader" placeholder="X-API-Key" maxlength="63" /></label>
               <label>顯示模型名稱<input id="nodeModelName" placeholder="例如 Qwen 3.6 35B" maxlength="120" required /></label>
-              <label>模型 ID<input id="nodeModelId" placeholder="例如 majentik/Qwen3.6-35B…" maxlength="240" required /></label>
-              <label>Zeabur Origin URL<input id="nodeOrigin" type="url" placeholder="https://node-origin.zeabur.app/v1" required /></label>
-              <label>該機器的 API Key<input id="nodeUpstreamKey" type="password" placeholder="貼上該服務的 API Key" autocomplete="new-password" required /></label>
-              <button class="primary" type="submit">加入機器</button>
+              <label>模型 ID<input id="nodeModelId" placeholder="例如 Qwen/Qwen3-32B" maxlength="240" required /></label>
+              <div class="node-form-actions">
+                <button id="probeNodeButton" class="toolbar-button" type="button">偵測 backend 與模型</button>
+                <button class="primary" type="submit">加入機器</button>
+              </div>
             </form>
           </div>
         </section>
@@ -208,6 +238,6 @@
     </main>
 
     <div id="toast" class="toast hidden" role="status"></div>
-    <script type="module" src="/app.js?v=10"></script>
+    <script type="module" src="/app.js?v=12"></script>
   </body>
 </html>
