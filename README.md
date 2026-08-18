@@ -88,7 +88,8 @@ flowchart LR
 
 - 管理員在 Dashboard 的「機器」加入機器名稱、backend、模型、節點 `/v1` URL 與驗證方式。「偵測 backend 與模型」會以一次 `/models` 請求判斷 backend 並帶出該節點已提供的模型。
 - Dashboard 每 5 秒以 `/models` 檢查各節點是否在線；驗證方式為「無驗證」的私有節點不需要上游 API Key。
-- 建立 API Key 時必須選擇機器；Key 只能呼叫該機器登記的模型。Client 只使用 Dashboard 發行的 `sk-mlx-*` key，不需要知道背後是哪一種 backend。
+- 一個節點（一個 endpoint）可以註冊多個模型，適合 vLLM 新版、Ollama、LM Studio 這類本身就能用 `model` 欄位切換模型的 backend；同一部主機若用不同 port 各跑一個獨立推理 process，仍要登記成不同節點。
+- 建立 API Key 時必須選擇機器；Key 可以呼叫該機器登記的所有已啟用模型。Client 只使用 Dashboard 發行的 `sk-mlx-*` key，不需要知道背後是哪一種 backend。
 - 新對話可在尚未送出第一則訊息前選擇機器和模型；送出後固定目標，避免對話內容跨機器混用。
 - API request 與對話會保存 `node_id`、模型與狀態，方便從使用紀錄追查。
 

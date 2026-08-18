@@ -48,4 +48,4 @@ nginx 會自動處理路徑改寫：打 `/node-a/v1/chat/completions` 會被轉�
 - 機器數量少（個位數）、想要最少的移動零件：做法一，每台機器一個 socat process。
 - 機器數量會持續增加、想要新增機器不用開新 port：做法二，一個 nginx 對外，內部用路徑分流。
 
-兩種都只是網路層的轉發規則，跟 [用 Tailscale 部署新節點](tailscale-node-deployment.md) 裡「backend 只聽 loopback／私有網段、ACL 限制誰能連進 relay」的安全模型完全相容，只是把「relay 轉發到自己這台機器」擴充成「relay 轉發到內部網路裡的任何一台機器」。
+兩種都只是網路層的轉發規則，跟「backend 只聽 loopback／私有網段、ACL 限制誰能連進 relay」的安全模型完全相容，只是把「relay 轉發到自己這台機器」擴充成「relay 轉發到內部網路裡的任何一台機器」（這個安全模型的完整部署步驟目前在 `docs/tailscale-node-deployment` 分支，尚未 merge）。
