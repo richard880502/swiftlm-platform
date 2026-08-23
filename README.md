@@ -49,6 +49,33 @@ Client API 使用 Dashboard 產生的 `sk-mlx-...` key。Origin 只供 Dashboard
 - `deploy/wondermesh/`：Wonder Mesh relay 部署檔。
 - `.state/`：PID 與後台日誌。
 
+## Dashboard Markdown 顯示
+
+Dashboard 的聊天介面支援將模型輸出的 Markdown 即時渲染成接近一般 AI Chat 介面的排版，而不是直接顯示原始 `#`、`**`、三個反引號或表格符號。
+
+目前支援：
+
+- `#` 到 `######` 標題
+- 粗體、斜體、刪除線
+- 有序與無序清單
+- Task list
+- Blockquote 與水平分隔線
+- Inline code
+- Fenced code block 與語言標籤
+- 程式碼區塊複製按鈕
+- Markdown table
+- 安全連結
+
+Markdown renderer 只套用在 assistant 訊息，使用者輸入仍維持原始文字。既有 SSE / streaming 流程沒有被替換；前端會在 token 持續抵達時重新渲染目前的 assistant 回覆，因此 Markdown 可以隨生成進度逐步成形。
+
+實作維持 Dashboard 原本的原生 ES module / no-build-step 架構，不依賴外部 CDN，也沒有為此加入 React、Vite 或額外的 npm frontend dependency：
+
+- `dashboard/public/markdown-enhancer.js`：Markdown parser、streaming DOM observer、code copy handling 與安全連結處理。
+- `dashboard/public/markdown.css`：標題、列表、引用、表格與 code block 等聊天內容樣式。
+- `dashboard/public/index.html`：載入上述 Markdown assets。
+
+安全上不直接執行模型回傳的 HTML，且連結只允許 `http:`、`https:`、`mailto:`、站內相對路徑與 `#` anchor；外部連結使用 `noopener noreferrer`。
+
 ## 兩種日誌
 
 ```zsh
