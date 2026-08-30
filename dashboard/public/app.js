@@ -1,4 +1,5 @@
 import { clearComposerInput, shouldSubmitComposer } from "./composer.js";
+import { updateConversationDrawer } from "./mobile-navigation.js";
 
 const state = {
   conversations: [],
@@ -12,6 +13,7 @@ const state = {
   editingNodeId: null,
   addingModelNodeId: null,
   stopping: false,
+  conversationDrawerOpen: false,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -27,6 +29,9 @@ const elements = {
   conversationSearch: $("#conversationSearch"),
   conversationSection: $("#conversationSection"),
   conversationList: $("#conversationList"),
+  sidebar: $("#conversationDrawer"),
+  mobileConversationButton: $("#mobileConversationButton"),
+  drawerBackdrop: $("#drawerBackdrop"),
   chatWorkspace: $("#chatWorkspace"),
   activityWorkspace: $("#activityWorkspace"),
   keysWorkspace: $("#keysWorkspace"),
@@ -92,6 +97,23 @@ const AUTH_TYPE_LABELS = {
   bearer: "Bearer Key",
   api_key_header: "API Key header",
 };
+
+const mobileViewport = window.matchMedia("(max-width: 820px)");
+
+function setConversationDrawer(open, { restoreFocus = false } = {}) {
+  state.conversationDrawerOpen = updateConversationDrawer({
+    appView: elements.appView,
+    sidebar: elements.sidebar,
+    toggleButton: elements.mobileConversationButton,
+    backdrop: elements.drawerBackdrop,
+  }, {
+    mobile: mobileViewport.matches,
+    inChatView: state.currentView === "chat",
+    open,
+  });
+
+  if (restoreFocus && mobileViewport.matches) elements.mobileConversationButton.focus();
+}
 
 const viewCopy = {
   chat: {
@@ -534,6 +556,7 @@ function applyViewCopy(type) {
 
 function switchView(type, options = {}) {
   state.currentView = type;
+  setConversationDrawer(false);
   elements.chatWorkspace.classList.toggle("hidden", type !== "chat");
   elements.activityWorkspace.classList.toggle("hidden", type !== "activity");
   elements.keysWorkspace.classList.toggle("hidden", type !== "keys");
@@ -981,7 +1004,10 @@ elements.logoutButton.addEventListener("click", async () => {
   state.current = null;
   showLogin();
 });
-elements.newChatButton.addEventListener("click", createConversation);
+elements.newChatButton.addEventListener("click", () => {
+  setConversationDrawer(false);
+  createConversation();
+});
 elements.emptyNewChat.addEventListener("click", createConversation);
 elements.deleteConversationButton.addEventListener("click", deleteCurrentConversation);
 elements.refreshActivityButton.addEventListener("click", renderActivity);
@@ -1087,6 +1113,17 @@ elements.messageInput.addEventListener("keydown", (event) => {
 document.querySelectorAll("[data-view]").forEach((button) => {
   button.addEventListener("click", () => switchView(button.dataset.view));
 });
+elements.mobileConversationButton.addEventListener("click", () => {
+  setConversationDrawer(!state.conversationDrawerOpen);
+});
+elements.drawerBackdrop.addEventListener("click", () => setConversationDrawer(false, { restoreFocus: true }));
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.conversationDrawerOpen) {
+    setConversationDrawer(false, { restoreFocus: true });
+  }
+});
+mobileViewport.addEventListener("change", () => setConversationDrawer(false));
 
 syncAuthFields();
+setConversationDrawer(false);
 bootstrap();
