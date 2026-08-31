@@ -1,5 +1,6 @@
 import { clearComposerInput, shouldSubmitComposer } from "./composer.js";
 import { updateConversationDrawer } from "./mobile-navigation.js";
+import { enhanceMarkdown, enhanceMarkdownIn } from "./markdown-enhancer.js";
 
 const state = {
   conversations: [],
@@ -414,6 +415,7 @@ function renderMessages() {
     ? messageHtml({ role: "assistant", content: "模型仍在生成，重新整理不會中斷回答…" }, true, "recoveringAssistant")
     : "";
   elements.messageList.innerHTML = messages + recovering;
+  enhanceMarkdownIn(elements.messageList);
   scrollMessages();
 }
 
@@ -456,6 +458,8 @@ async function sendMessage(event) {
   const pending = $("#pendingAssistant");
   const output = pending.querySelector(".message-content");
   scrollMessages();
+  elements.messageList.classList.add("is-streaming");
+  let renderFrame = null;
 
   try {
     const response = await fetch(`/api/conversations/${conversationId}/messages`, {
@@ -479,6 +483,16 @@ async function sendMessage(event) {
     let buffer = "";
     let assistant = "";
     let stopped = false;
+    const flushPendingOutput = () => {
+      renderFrame = null;
+      output.textContent = assistant;
+      scrollMessages();
+    };
+
+    const schedulePendingOutput = () => {
+      if (renderFrame !== null) return;
+      renderFrame = requestAnimationFrame(flushPendingOutput);
+    };
 
     const consume = (eventText) => {
       const eventName = eventText.split("\n").find((line) => line.startsWith("event:"))?.slice(6).trim();
@@ -496,8 +510,7 @@ async function sendMessage(event) {
       } catch {
         assistant += data;
       }
-      output.textContent = assistant;
-      scrollMessages();
+      schedulePendingOutput();
     };
 
     while (true) {
@@ -511,7 +524,12 @@ async function sendMessage(event) {
       }
     }
     if (buffer.trim()) consume(buffer);
+    if (renderFrame !== null) {
+      cancelAnimationFrame(renderFrame);
+      flushPendingOutput();
+    }
     pending.classList.remove("pending");
+    enhanceMarkdown(output);
     if (state.current?.id === conversationId) {
       state.current = await request(`/api/conversations/${conversationId}`);
       state.current.generation_in_progress = false;
@@ -521,11 +539,13 @@ async function sendMessage(event) {
       showToast(stopped ? "已停止生成" : "回答已完成");
     }
   } catch (error) {
+    if (renderFrame !== null) cancelAnimationFrame(renderFrame);
     if (state.current?.id === conversationId) state.current.generation_in_progress = false;
     pending.classList.remove("pending");
     output.textContent = `請求失敗：${error.message}`;
     await loadNodes();
   } finally {
+    elements.messageList.classList.remove("is-streaming");
     state.sending = false;
     state.stopping = false;
     if (state.current?.id === conversationId) updateConversationHeader();

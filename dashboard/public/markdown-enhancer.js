@@ -57,7 +57,7 @@ function splitTableRow(line = "") {
   return line.trim().replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
 }
 
-function renderMarkdown(source = "") {
+export function renderMarkdown(source = "") {
   const lines = String(source).replace(/\r\n?/g, "\n").split("\n");
   const output = [];
   let index = 0;
@@ -184,7 +184,7 @@ function renderMarkdown(source = "") {
   return output.join("");
 }
 
-function enhance(element) {
+export function enhanceMarkdown(element) {
   if (!(element instanceof HTMLElement)) return;
   const previous = rendered.get(element);
   if (previous && element.innerHTML === previous.html) return;
@@ -196,40 +196,22 @@ function enhance(element) {
   element.innerHTML = html;
 }
 
-function enhanceAll(root = document) {
-  root.querySelectorAll(".message.assistant .message-content").forEach(enhance);
+export function enhanceMarkdownIn(root = document) {
+  root.querySelectorAll(".message.assistant .message-content").forEach(enhanceMarkdown);
 }
 
-const observer = new MutationObserver((mutations) => {
-  const candidates = new Set();
-  for (const mutation of mutations) {
-    const element = mutation.target instanceof Element
-      ? mutation.target.closest(".message.assistant .message-content")
-      : mutation.target.parentElement?.closest(".message.assistant .message-content");
-    if (element) candidates.add(element);
-
-    mutation.addedNodes.forEach((node) => {
-      if (!(node instanceof Element)) return;
-      if (node.matches?.(".message.assistant .message-content")) candidates.add(node);
-      node.querySelectorAll?.(".message.assistant .message-content").forEach((child) => candidates.add(child));
-    });
-  }
-  candidates.forEach(enhance);
-});
-
-observer.observe(document.body, { subtree: true, childList: true, characterData: true });
-enhanceAll();
-
-document.addEventListener("click", async (event) => {
-  const button = event.target.closest(".md-copy-code");
-  if (!button) return;
-  const code = button.closest(".md-code-block")?.querySelector("code")?.textContent || "";
-  try {
-    await navigator.clipboard.writeText(code);
-    const original = button.textContent;
-    button.textContent = "已複製";
-    setTimeout(() => { button.textContent = original; }, 1200);
-  } catch {
-    button.textContent = "複製失敗";
-  }
-});
+if (typeof document !== "undefined") {
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest(".md-copy-code");
+    if (!button) return;
+    const code = button.closest(".md-code-block")?.querySelector("code")?.textContent || "";
+    try {
+      await navigator.clipboard.writeText(code);
+      const original = button.textContent;
+      button.textContent = "已複製";
+      setTimeout(() => { button.textContent = original; }, 1200);
+    } catch {
+      button.textContent = "複製失敗";
+    }
+  });
+}
