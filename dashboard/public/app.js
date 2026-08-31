@@ -1,5 +1,6 @@
 import { clearComposerInput, shouldSubmitComposer } from "./composer.js";
 import { updateConversationDrawer } from "./mobile-navigation.js";
+import { enhanceMarkdown, enhanceMarkdownIn } from "./markdown-enhancer.js";
 
 const state = {
   conversations: [],
@@ -355,7 +356,9 @@ function updateConversationHeader() {
   elements.sendButton.setAttribute("aria-label", busy ? "停止生成" : "傳送");
   elements.sendButton.classList.toggle("stop-button", busy);
   elements.messageInput.disabled = busy;
-  const targetLocked = busy || state.current.messages.length > 0;
+  // A conversation can move to a different registered model at any time; the
+  // existing messages stay as context and only the next completion changes.
+  const targetLocked = busy;
   elements.conversationNode.disabled = targetLocked;
   elements.conversationModel.disabled = targetLocked;
 }
@@ -414,6 +417,7 @@ function renderMessages() {
     ? messageHtml({ role: "assistant", content: "模型仍在生成，重新整理不會中斷回答…" }, true, "recoveringAssistant")
     : "";
   elements.messageList.innerHTML = messages + recovering;
+  enhanceMarkdownIn(elements.messageList);
   scrollMessages();
 }
 
@@ -456,6 +460,8 @@ async function sendMessage(event) {
   const pending = $("#pendingAssistant");
   const output = pending.querySelector(".message-content");
   scrollMessages();
+  elements.messageList.classList.add("is-streaming");
+  let renderFrame = null;
 
   try {
     const response = await fetch(`/api/conversations/${conversationId}/messages`, {
@@ -479,6 +485,16 @@ async function sendMessage(event) {
     let buffer = "";
     let assistant = "";
     let stopped = false;
+    const flushPendingOutput = () => {
+      renderFrame = null;
+      output.textContent = assistant;
+      scrollMessages();
+    };
+
+    const schedulePendingOutput = () => {
+      if (renderFrame !== null) return;
+      renderFrame = requestAnimationFrame(flushPendingOutput);
+    };
 
     const consume = (eventText) => {
       const eventName = eventText.split("\n").find((line) => line.startsWith("event:"))?.slice(6).trim();
@@ -496,8 +512,7 @@ async function sendMessage(event) {
       } catch {
         assistant += data;
       }
-      output.textContent = assistant;
-      scrollMessages();
+      schedulePendingOutput();
     };
 
     while (true) {
@@ -511,7 +526,12 @@ async function sendMessage(event) {
       }
     }
     if (buffer.trim()) consume(buffer);
+    if (renderFrame !== null) {
+      cancelAnimationFrame(renderFrame);
+      flushPendingOutput();
+    }
     pending.classList.remove("pending");
+    enhanceMarkdown(output);
     if (state.current?.id === conversationId) {
       state.current = await request(`/api/conversations/${conversationId}`);
       state.current.generation_in_progress = false;
@@ -521,11 +541,13 @@ async function sendMessage(event) {
       showToast(stopped ? "已停止生成" : "回答已完成");
     }
   } catch (error) {
+    if (renderFrame !== null) cancelAnimationFrame(renderFrame);
     if (state.current?.id === conversationId) state.current.generation_in_progress = false;
     pending.classList.remove("pending");
     output.textContent = `請求失敗：${error.message}`;
     await loadNodes();
   } finally {
+    elements.messageList.classList.remove("is-streaming");
     state.sending = false;
     state.stopping = false;
     if (state.current?.id === conversationId) updateConversationHeader();
@@ -960,7 +982,7 @@ async function renderEnrollmentTokens(revealedToken) {
 }
 
 async function updateConversationTarget() {
-  if (!state.current || state.current.messages.length > 0 || state.sending || state.current.generation_in_progress) {
+  if (!state.current || state.sending || state.current.generation_in_progress) {
     renderNodeOptions();
     return;
   }

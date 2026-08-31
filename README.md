@@ -6,6 +6,15 @@
 
 `majentik/Qwen3.6-35B-A3B-TurboQuant-MLX-4bit`
 
+## v2.0.0
+
+- Dashboard 改為完整的手機優先介面：底部導覽、最近對話抽屜、安全區域支援與窄螢幕聊天／表單排版。
+- 長篇串流回覆會以每個畫面影格一次的純文字更新，完成後才進行 Markdown 渲染，避免行動裝置因反覆重排而卡住。
+- 對話可在非生成期間切換已註冊的機器或模型；既有歷史會保留，下一次回答才使用新的目標。
+- GitHub Actions 會自動執行 Dashboard 與 MLX Gateway 測試。
+
+感謝 [@yenhao-huang](https://github.com/yenhao-huang) 更新手機版介面與行動裝置使用體驗。
+
 ## 最簡單的用法
 
 ```zsh
@@ -66,11 +75,11 @@ Dashboard 的聊天介面支援將模型輸出的 Markdown 即時渲染成接近
 - Markdown table
 - 安全連結
 
-Markdown renderer 只套用在 assistant 訊息，使用者輸入仍維持原始文字。既有 SSE / streaming 流程沒有被替換；前端會在 token 持續抵達時重新渲染目前的 assistant 回覆，因此 Markdown 可以隨生成進度逐步成形。
+Markdown renderer 只套用在 assistant 訊息，使用者輸入仍維持原始文字。既有 SSE / streaming 流程沒有被替換；串流期間以前端畫面影格為單位更新純文字，回答完成後才將該則訊息渲染為 Markdown。這避免每個 token 反覆解析整段訊息與重建 DOM，能維持手機上的流暢度。
 
 實作維持 Dashboard 原本的原生 ES module / no-build-step 架構，不依賴外部 CDN，也沒有為此加入 React、Vite 或額外的 npm frontend dependency：
 
-- `dashboard/public/markdown-enhancer.js`：Markdown parser、streaming DOM observer、code copy handling 與安全連結處理。
+- `dashboard/public/markdown-enhancer.js`：Markdown parser、完成後的單則訊息渲染、code copy handling 與安全連結處理。
 - `dashboard/public/markdown.css`：標題、列表、引用、表格與 code block 等聊天內容樣式。
 - `dashboard/public/index.html`：載入上述 Markdown assets。
 
@@ -117,7 +126,7 @@ flowchart LR
 - Dashboard 每 5 秒以 `/models` 檢查各節點是否在線；驗證方式為「無驗證」的私有節點不需要上游 API Key。
 - 一個節點（一個 endpoint）可以註冊多個模型，適合 vLLM 新版、Ollama、LM Studio 這類本身就能用 `model` 欄位切換模型的 backend；同一部主機若用不同 port 各跑一個獨立推理 process，仍要登記成不同節點。
 - 建立 API Key 時必須選擇機器；Key 可以呼叫該機器登記的所有已啟用模型。Client 只使用 Dashboard 發行的 `sk-mlx-*` key，不需要知道背後是哪一種 backend。
-- 新對話可在尚未送出第一則訊息前選擇機器和模型；送出後固定目標，避免對話內容跨機器混用。
+- 對話可在沒有生成中的請求時切換機器和模型；既有訊息會原樣保留，只有下一次回答改由新目標生成。每筆 request 都會記錄實際使用的機器與模型。
 - API request 與對話會保存 `node_id`、模型與狀態，方便從使用紀錄追查。
 
 上游憑證不會顯示給 Dashboard 使用者；預設 Mac mini 的 key 仍位於 Keychain 與 Dashboard 的 Zeabur secret environment variable，額外節點的憑證則只會加密保存於 Dashboard 的持久化資料庫，且預設節點的 master key 不會被借給任何其他節點。
