@@ -638,8 +638,8 @@ app.post("/api/conversations", requireAdmin, (req, res) => {
 app.patch("/api/conversations/:id/target", requireAdmin, (req, res) => {
   const conversation = store.getConversation(req.params.id);
   if (!conversation) return res.status(404).json({ error: { message: "Conversation not found" } });
-  if (conversation.messages.length > 0) {
-    return res.status(409).json({ error: { message: "已有訊息的對話不能切換機器或模型，請建立新對話。" } });
+  if (activeGenerations.has(conversation.id)) {
+    return res.status(409).json({ error: { message: "模型正在生成，完成後才能切換機器或模型。" } });
   }
   const nodeId = safeNodeId(req.body?.node_id);
   const node = resolveEnabledNode(nodeId);

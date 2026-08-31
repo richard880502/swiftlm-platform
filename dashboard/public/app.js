@@ -356,7 +356,9 @@ function updateConversationHeader() {
   elements.sendButton.setAttribute("aria-label", busy ? "停止生成" : "傳送");
   elements.sendButton.classList.toggle("stop-button", busy);
   elements.messageInput.disabled = busy;
-  const targetLocked = busy || state.current.messages.length > 0;
+  // A conversation can move to a different registered model at any time; the
+  // existing messages stay as context and only the next completion changes.
+  const targetLocked = busy;
   elements.conversationNode.disabled = targetLocked;
   elements.conversationModel.disabled = targetLocked;
 }
@@ -980,7 +982,7 @@ async function renderEnrollmentTokens(revealedToken) {
 }
 
 async function updateConversationTarget() {
-  if (!state.current || state.current.messages.length > 0 || state.sending || state.current.generation_in_progress) {
+  if (!state.current || state.sending || state.current.generation_in_progress) {
     renderNodeOptions();
     return;
   }
