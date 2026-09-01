@@ -156,7 +156,11 @@
                     </select>
                   </label>
                 </div>
-                <button id="sendButton" class="send-button" type="submit" aria-label="傳送">↑</button>
+                <div class="composer-actions">
+                  <span id="queueStatus" class="queue-status" aria-live="polite" hidden></span>
+                  <button id="queueButton" class="queue-button" type="button" aria-label="加入待送" title="加入待送" hidden>＋</button>
+                  <button id="sendButton" class="send-button" type="submit" aria-label="傳送">↑</button>
+                </div>
               </div>
             </form>
           </section>

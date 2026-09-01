@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { renderMarkdown } from "../public/markdown-enhancer.js";
+import { renderMarkdown, splitStableMarkdown } from "../public/markdown-enhancer.js";
 
 test("Markdown renderer creates safe rich content without browser observers", () => {
   const output = renderMarkdown("# Title\n\nUse **bold** and [safe](https://example.com).\n\n```js\nconst answer = 42;\n```");
@@ -21,6 +21,17 @@ test("Markdown renderer rejects unsafe link schemes", () => {
   assert.doesNotMatch(output, /<a\s/i);
 });
 
+test("streaming Markdown only finalizes complete blocks", () => {
+  assert.deepEqual(splitStableMarkdown("first paragraph\n\nnext"), {
+    completed: "first paragraph\n\n",
+    pending: "next",
+  });
+  assert.deepEqual(splitStableMarkdown("```js\nconst n = 1;\n```\nnext"), {
+    completed: "```js\nconst n = 1;\n```\n",
+    pending: "next",
+  });
+});
+
 test("streaming updates are frame-batched and do not use a page-wide observer", async () => {
   const [renderer, app] = await Promise.all([
     readFile(new URL("../public/markdown-enhancer.js", import.meta.url), "utf8"),
@@ -29,5 +40,6 @@ test("streaming updates are frame-batched and do not use a page-wide observer", 
 
   assert.doesNotMatch(renderer, /new MutationObserver/);
   assert.match(app, /requestAnimationFrame\(flushPendingOutput\)/);
-  assert.match(app, /enhanceMarkdown\(output\)/);
+  assert.match(app, /createStreamingMarkdownRenderer\(output\)/);
+  assert.match(app, /streamRenderer\.finish\(assistant\)/);
 });

@@ -1,6 +1,7 @@
 import { clearComposerInput, shouldSubmitComposer } from "./composer.js";
+import { createMessageQueue } from "./message-queue.js";
 import { updateConversationDrawer } from "./mobile-navigation.js";
-import { enhanceMarkdown, enhanceMarkdownIn } from "./markdown-enhancer.js";
+import { createStreamingMarkdownRenderer, enhanceMarkdownIn } from "./markdown-enhancer.js";
 
 const state = {
   conversations: [],
@@ -15,6 +16,8 @@ const state = {
   addingModelNodeId: null,
   stopping: false,
   conversationDrawerOpen: false,
+  activeConversationId: null,
+  messageQueue: createMessageQueue(),
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -46,6 +49,8 @@ const elements = {
   messageList: $("#messageList"),
   composer: $("#composer"),
   messageInput: $("#messageInput"),
+  queueButton: $("#queueButton"),
+  queueStatus: $("#queueStatus"),
   sendButton: $("#sendButton"),
   thinkingToggle: $("#thinkingToggle"),
   maxTokens: $("#maxTokens"),
@@ -343,7 +348,9 @@ async function selectConversation(id) {
 }
 
 function updateConversationHeader() {
-  const busy = state.sending || state.current.generation_in_progress;
+  const busy = state.current.generation_in_progress || (
+    state.sending && state.activeConversationId === state.current.id
+  );
   elements.viewTitle.textContent = state.current.title;
   elements.viewDescription.textContent = state.current.generation_in_progress
     ? "模型仍在生成 · 完成後會自動更新"
@@ -355,12 +362,12 @@ function updateConversationHeader() {
   elements.sendButton.textContent = busy ? "■" : "↑";
   elements.sendButton.setAttribute("aria-label", busy ? "停止生成" : "傳送");
   elements.sendButton.classList.toggle("stop-button", busy);
-  elements.messageInput.disabled = busy;
   // A conversation can move to a different registered model at any time; the
   // existing messages stay as context and only the next completion changes.
   const targetLocked = busy;
   elements.conversationNode.disabled = targetLocked;
   elements.conversationModel.disabled = targetLocked;
+  updateQueueUi();
 }
 
 function stopGenerationPolling() {
@@ -441,26 +448,90 @@ function scrollMessages() {
 function resizeComposer() {
   elements.messageInput.style.height = "auto";
   elements.messageInput.style.height = `${Math.min(elements.messageInput.scrollHeight, 180)}px`;
+  updateQueueUi();
+}
+
+function generationOptions() {
+  return {
+    enableThinking: elements.thinkingToggle.checked,
+    maxTokens: Number(elements.maxTokens.value),
+  };
+}
+
+function updateQueueUi() {
+  const currentId = state.current?.id;
+  const busy = Boolean(currentId && (state.current.generation_in_progress || (
+    state.sending && state.activeConversationId === currentId
+  )));
+  const count = currentId ? state.messageQueue.countFor(currentId) : 0;
+  elements.queueButton.hidden = !busy;
+  elements.queueButton.disabled = !busy || !elements.messageInput.value.trim();
+  elements.queueStatus.hidden = count === 0;
+  elements.queueStatus.textContent = count ? `待送 ${count} 則` : "";
+}
+
+function enqueueCurrentMessage(content) {
+  if (!state.current) return false;
+  const queued = state.messageQueue.enqueue({
+    conversationId: state.current.id,
+    content,
+    options: generationOptions(),
+  });
+  if (!queued) {
+    showToast("待送訊息已達上限（20 則）");
+    return false;
+  }
+  clearComposerInput(elements.messageInput);
+  updateQueueUi();
+  showToast(`已加入待送（${state.messageQueue.countFor(state.current.id)} 則）`);
+  return true;
+}
+
+async function drainMessageQueue() {
+  if (state.sending) return;
+  const next = state.messageQueue.take();
+  updateQueueUi();
+  if (!next) return;
+  await runMessage(next);
+  await drainMessageQueue();
 }
 
 async function sendMessage(event) {
   event.preventDefault();
   const content = elements.messageInput.value.trim();
-  if (!content || !state.current || state.sending || state.current.generation_in_progress) return;
-
-  const conversationId = state.current.id;
-  state.sending = true;
-  state.stopping = false;
-  state.current.generation_in_progress = true;
-  updateConversationHeader();
+  if (!content || !state.current) return;
+  if (state.sending || state.current.generation_in_progress) {
+    enqueueCurrentMessage(content);
+    return;
+  }
+  const message = { conversationId: state.current.id, content, options: generationOptions() };
   clearComposerInput(elements.messageInput);
-  state.current.messages.push({ role: "user", content, created_at: new Date().toISOString() });
-  renderMessages();
-  elements.messageList.insertAdjacentHTML("beforeend", messageHtml({ role: "assistant", content: "" }, true));
-  const pending = $("#pendingAssistant");
-  const output = pending.querySelector(".message-content");
-  scrollMessages();
-  elements.messageList.classList.add("is-streaming");
+  await runMessage(message);
+  await drainMessageQueue();
+}
+
+async function runMessage({ conversationId, content, options }) {
+  const isCurrentConversation = () => state.current?.id === conversationId;
+  const isVisible = isCurrentConversation();
+
+  state.sending = true;
+  state.activeConversationId = conversationId;
+  state.stopping = false;
+  let pending;
+  let output;
+  let streamRenderer;
+  if (isVisible) {
+    state.current.generation_in_progress = true;
+    updateConversationHeader();
+    state.current.messages.push({ role: "user", content, created_at: new Date().toISOString() });
+    renderMessages();
+    elements.messageList.insertAdjacentHTML("beforeend", messageHtml({ role: "assistant", content: "" }, true));
+    pending = $("#pendingAssistant");
+    output = pending.querySelector(".message-content");
+    streamRenderer = createStreamingMarkdownRenderer(output);
+    scrollMessages();
+    elements.messageList.classList.add("is-streaming");
+  }
   let renderFrame = null;
 
   try {
@@ -470,8 +541,8 @@ async function sendMessage(event) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         content,
-        enable_thinking: elements.thinkingToggle.checked,
-        max_tokens: Number(elements.maxTokens.value),
+        enable_thinking: options.enableThinking,
+        max_tokens: options.maxTokens,
         temperature: 0.7,
       }),
     });
@@ -487,8 +558,10 @@ async function sendMessage(event) {
     let stopped = false;
     const flushPendingOutput = () => {
       renderFrame = null;
-      output.textContent = assistant;
-      scrollMessages();
+      if (output) {
+        streamRenderer.update(assistant);
+        scrollMessages();
+      }
     };
 
     const schedulePendingOutput = () => {
@@ -530,9 +603,11 @@ async function sendMessage(event) {
       cancelAnimationFrame(renderFrame);
       flushPendingOutput();
     }
-    pending.classList.remove("pending");
-    enhanceMarkdown(output);
-    if (state.current?.id === conversationId) {
+    if (pending) {
+      pending.classList.remove("pending");
+      streamRenderer.finish(assistant);
+    }
+    if (isCurrentConversation()) {
       state.current = await request(`/api/conversations/${conversationId}`);
       state.current.generation_in_progress = false;
       updateConversationHeader();
@@ -543,20 +618,22 @@ async function sendMessage(event) {
   } catch (error) {
     if (renderFrame !== null) cancelAnimationFrame(renderFrame);
     if (state.current?.id === conversationId) state.current.generation_in_progress = false;
-    pending.classList.remove("pending");
-    output.textContent = `請求失敗：${error.message}`;
+    if (pending) pending.classList.remove("pending");
+    if (output) output.textContent = `請求失敗：${error.message}`;
     await loadNodes();
   } finally {
-    elements.messageList.classList.remove("is-streaming");
+    if (isVisible) elements.messageList.classList.remove("is-streaming");
     state.sending = false;
+    state.activeConversationId = null;
     state.stopping = false;
-    if (state.current?.id === conversationId) updateConversationHeader();
-    if (!state.current?.generation_in_progress) elements.messageInput.focus();
+    if (isCurrentConversation()) updateConversationHeader();
+    if (isCurrentConversation() && !state.current?.generation_in_progress) elements.messageInput.focus();
   }
 }
 
 async function stopCurrentGeneration() {
-  if (!state.current || (!state.sending && !state.current.generation_in_progress) || state.stopping) return;
+  const currentSending = state.sending && state.activeConversationId === state.current?.id;
+  if (!state.current || (!currentSending && !state.current.generation_in_progress) || state.stopping) return;
   state.stopping = true;
   updateConversationHeader();
   try {
@@ -1119,6 +1196,10 @@ elements.conversationSearch.addEventListener("input", () => {
   renderConversationList();
 });
 elements.composer.addEventListener("submit", sendMessage);
+elements.queueButton.addEventListener("click", () => {
+  const content = elements.messageInput.value.trim();
+  if (content) enqueueCurrentMessage(content);
+});
 elements.sendButton.addEventListener("click", (event) => {
   if (state.sending || state.current?.generation_in_progress) {
     event.preventDefault();

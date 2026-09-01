@@ -184,6 +184,66 @@ export function renderMarkdown(source = "") {
   return output.join("");
 }
 
+export function splitStableMarkdown(source = "") {
+  const text = String(source).replace(/\r\n?/g, "\n");
+  const lines = text.split("\n");
+  let fenceOpen = false;
+  let stableEnd = 0;
+  let offset = 0;
+
+  lines.forEach((line, index) => {
+    const endsWithNewline = index < lines.length - 1;
+    const lineEnd = offset + line.length + (endsWithNewline ? 1 : 0);
+    if (/^\s*```/.test(line)) {
+      fenceOpen = !fenceOpen;
+      if (!fenceOpen) stableEnd = lineEnd;
+    } else if (!fenceOpen && !line.trim()) {
+      stableEnd = lineEnd;
+    }
+    offset = lineEnd;
+  });
+
+  return {
+    completed: text.slice(0, stableEnd),
+    pending: text.slice(stableEnd),
+  };
+}
+
+export function createStreamingMarkdownRenderer(element) {
+  if (!(element instanceof HTMLElement)) {
+    return { update() {}, finish() {} };
+  }
+
+  const pending = document.createElement("span");
+  pending.className = "stream-markdown-pending";
+  element.replaceChildren(pending);
+  let renderedLength = 0;
+
+  const appendCompleted = (source) => {
+    if (!source) return;
+    const block = document.createElement("div");
+    block.className = "stream-markdown-block";
+    block.innerHTML = renderMarkdown(source);
+    element.insertBefore(block, pending);
+  };
+
+  return {
+    update(source = "") {
+      const { completed, pending: tail } = splitStableMarkdown(source);
+      if (completed.length > renderedLength) {
+        appendCompleted(completed.slice(renderedLength));
+        renderedLength = completed.length;
+      }
+      pending.textContent = tail;
+    },
+    finish(source = "") {
+      const text = String(source).replace(/\r\n?/g, "\n");
+      appendCompleted(text.slice(renderedLength));
+      pending.remove();
+    },
+  };
+}
+
 export function enhanceMarkdown(element) {
   if (!(element instanceof HTMLElement)) return;
   const previous = rendered.get(element);
