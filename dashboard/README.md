@@ -8,6 +8,8 @@ Dashboard 是平台的公開 API gateway 與管理介面，部署在 Zeabur Tenc
 - 建立、列出與撤銷綁定指定機器的客戶 API key。
 - OpenAI-compatible `/v1/models` 與 `/v1/chat/completions`。
 - 多輪網頁聊天；可在沒有生成中的請求時切換機器與模型，既有歷史保持不變，下一次回答才改走新目標。
+- 生成期間仍可輸入下一則內容；按 Enter 或「＋」會依 FIFO 順序加入最多 20 則的瀏覽器端待送列隊。上游模型仍一次只處理一則，避免共享 KV cache 的請求交錯。
+- 串流 Markdown 以完整區塊為單位渲染：段落、清單與已關閉的 code fence 立即格式化，未完成的尾端保留純文字，降低手機重排負擔。
 - 手機版介面：底部主要導覽、最近對話抽屜、safe area 與窄螢幕表單／聊天排版。
 - 模型機器頁面：每 5 秒確認每個節點的模型在線狀態，並可偵測節點的 inference backend。
 - API request、token、token/s、TTFT、排隊時間、延遲、機器、模型與內容 preview 紀錄。

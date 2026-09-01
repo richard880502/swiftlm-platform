@@ -360,6 +360,10 @@ input { padding: 12px 13px; }
 .composer textarea { width: 100%; max-height: 180px; resize: none; padding: 7px 0 10px; border: 0; background: transparent; line-height: 1.5; }
 .composer textarea:focus { box-shadow: none; }
 .composer-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.composer-actions { display: flex; align-items: center; gap: 8px; }
+.queue-status { color: var(--muted); font-size: 10px; white-space: nowrap; }
+.queue-button { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; color: #9fd0ff; font-size: 20px; border: 1px solid rgba(41,151,255,.32); border-radius: 10px; background: rgba(41,151,255,.11); }
+.queue-button:disabled { opacity: .42; }
 .settings-row { display: flex; align-items: center; gap: 14px; }
 .settings-row label { display: flex; align-items: center; gap: 7px; }
 .settings-row select { padding: 4px 7px; font-size: 11px; }
@@ -617,6 +621,8 @@ input { padding: 12px 13px; }
   .composer { margin: 0 10px 10px; padding: 9px 9px 8px 13px; }
   .composer-footer { align-items: end; }
   .send-button { width: 44px; height: 44px; flex: 0 0 auto; }
+  .queue-button { width: 44px; height: 44px; flex: 0 0 auto; }
+  .queue-status { display: none; }
 
   .management-view { padding: 13px; }
   .content-card, .key-reveal { min-width: 0; }

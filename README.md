@@ -6,6 +6,11 @@
 
 `majentik/Qwen3.6-35B-A3B-TurboQuant-MLX-4bit`
 
+## v2.1.0
+
+- 對話生成時輸入框保持可用；按 Enter 或右下角的「＋」可將下一則訊息加入 FIFO 待送列隊（最多 20 則）。模型推理仍維持單一請求，避免不同對話的 KV cache 或串流內容互相干擾。
+- Markdown 串流改為「完成區塊才渲染」：完整段落、清單與已關閉的程式碼區塊立即轉為富文字，尚未完成的尾端仍以純文字顯示，兼顧閱讀即時性與行動裝置效能。
+
 ## v2.0.0
 
 - Dashboard 改為完整的手機優先介面：底部導覽、最近對話抽屜、安全區域支援與窄螢幕聊天／表單排版。
@@ -75,7 +80,7 @@ Dashboard 的聊天介面支援將模型輸出的 Markdown 即時渲染成接近
 - Markdown table
 - 安全連結
 
-Markdown renderer 只套用在 assistant 訊息，使用者輸入仍維持原始文字。既有 SSE / streaming 流程沒有被替換；串流期間以前端畫面影格為單位更新純文字，回答完成後才將該則訊息渲染為 Markdown。這避免每個 token 反覆解析整段訊息與重建 DOM，能維持手機上的流暢度。
+Markdown renderer 只套用在 assistant 訊息，使用者輸入仍維持原始文字。既有 SSE / streaming 流程沒有被替換；串流內容仍以畫面影格為單位合併更新，但完整段落、清單與已關閉的 fenced code block 會先完成一次 Markdown 渲染，未完成的尾端則維持純文字。這避免每個 token 反覆解析整段訊息與重建 DOM，同時不用等整份回答完成才看到格式化內容。
 
 實作維持 Dashboard 原本的原生 ES module / no-build-step 架構，不依賴外部 CDN，也沒有為此加入 React、Vite 或額外的 npm frontend dependency：
 
