@@ -47,10 +47,11 @@ cd ~/Desktop/mlx-server
 
 - 本機 Gateway：`http://127.0.0.1:18124/v1`
 - SwiftLM Direct（內部）：`http://127.0.0.1:18123/v1`
-- Client API：`https://richard-swiftlm.zeabur.app/v1`
-- SwiftLM origin：`https://richard-swiftlm-origin-7165.zeabur.app/v1`
+- Coolify Client API：`https://richardapi.duckdns.org/v1`
+- Coolify Mac mini 節點 API：`https://richardapi.duckdns.org/nodes/mac-mini/v1`
+- 舊 Zeabur Client API（保留供遷移回復）：`https://richard-swiftlm.zeabur.app/v1`
 
-Client API 使用 Dashboard 產生的 `sk-mlx-...` key。Origin 只供 Dashboard 與管理測試使用，使用 SwiftLM master key。
+Client API 使用 Dashboard 產生的 `sk-mlx-...` key。上游 origin 只供 Dashboard 與管理測試使用，使用該節點的上游憑證；Coolify 與 Zeabur 目前是各自的資料庫，不會自動同步新對話與新 key。
 
 ## 重要檔案
 
@@ -59,7 +60,7 @@ Client API 使用 Dashboard 產生的 `sk-mlx-...` key。Origin 只供 Dashboard
 - `common.sh`：共用設定與模型路徑解析。
 - `swiftlm-runtime/`：SwiftLM binary 與 Metal runtime。
 - `mlx-gateway/`：統一入口、推理佇列、request ID 與結構化效能紀錄。可選擇性啟用 node-agent 模式（enrollment、簽章 heartbeat），見 `mlx-gateway/join.mjs` 與 [docs/inference-nodes.md](docs/inference-nodes.md)；未啟用時行為完全不變。
-- `dashboard/`：Zeabur Dashboard、API gateway、聊天及 request history。
+- `dashboard/`：Dashboard、API gateway、聊天及 request history，可部署於 Zeabur 或 Coolify。
 - `deploy/wondermesh/`：Wonder Mesh relay 部署檔。
 - `.state/`：PID 與後台日誌。
 

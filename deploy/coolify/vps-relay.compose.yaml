@@ -1,0 +1,24 @@
+services:
+  tailnet:
+    image: tailscale/tailscale:v1.102.3
+    hostname: ${TAILNET_HOSTNAME:-coolify-api-egress}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_AUTH_ONCE: "true"
+      TS_BOOT_TIMEOUT: 15m
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_TAILNET_TARGET_IP: ${TAILNET_TARGET_IP:?Set the model VM tailnet IPv4}
+    volumes:
+      - tailnet-state:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add: [NET_ADMIN, NET_RAW]
+    restart: unless-stopped
+  relay:
+    image: alpine/socat:1.8.0.3
+    command: ["-d", "-d", "TCP-LISTEN:8080,fork,reuseaddr", "TCP:tailnet:${TARGET_PORT:-18124}"]
+    depends_on: [tailnet]
+    expose: ["8080"]
+    restart: unless-stopped
+volumes:
+  tailnet-state:

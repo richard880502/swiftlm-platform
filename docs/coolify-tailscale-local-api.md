@@ -20,6 +20,8 @@ flowchart LR
 
 本部署使用 Coolify 既有 Traefik 處理 HTTPS，不必額外啟動 Caddy；Caddy 也可以擔任反向代理，但單純轉送不會取代 Dashboard 的 API key 驗證。其他平台或 Tailscale 版本的設定需重新驗證。
 
+可調整的 Compose 範本位於 [`deploy/coolify/`](../deploy/coolify/)：VPS egress／relay、VM host relay 和 Dashboard。Dashboard 範本的相對 build context 適合本地 Compose；在 Coolify 的自訂 Compose 服務中需改成可存取的固定 Git build context。這些範本不含憑證，也不會自動設定 VM 的 Tailscale Serve、ACL 或管理 SSH bridge。
+
 ## 1. 準備與連線
 
 1. 準備可管理 Docker 的 Coolify VPS、可指向 VPS 的 DNS 名稱，以及 TCP 80/443 的防火牆規則。Coolify 每個服務需設定正確的容器 port，並確認 TLS 憑證有效。
@@ -27,6 +29,23 @@ flowchart LR
 3. 建立獨立 Lima VM，安裝 Docker 與 Tailscale，將它和 VPS 的 Tailscale egress 加入同一個 tailnet。此部署採用 VPS 的 TUN 模式；不同環境若只支援 userspace，必須額外規劃 proxy，不可假設系統路由會自動生效。
 4. 使用 VM 上的 Tailscale Serve 與只綁在 VM loopback 的 relay，轉送到主機 Gateway；在 VPS 建立只供內部 Docker 網路使用的 relay，讓 Dashboard 指向該 relay 的 `/v1`。兩端 Tailscale 網路和 port 應以 tailnet policy 限制，避免公開未驗證的 origin。
 5. 若 Coolify 透過該 VM 的 SSH bridge 管理它，VPS egress 或 bridge 一旦停止，Coolify 也會失去 VM 管理連線。先保留 `limactl shell <vm>` 的復原方式，再操作 bridge。
+
+例如，在已安裝 Lima 的 Mac 上建立新的 Docker VM：
+
+```sh
+limactl start --name=llm-relay --cpus=1 --memory=1 --disk=10 template:docker
+limactl shell llm-relay
+```
+
+在 VM 內依所用 Linux 發行版安裝並啟動 Tailscale，透過 `tailscale up` 加入使用者自己的 tailnet；在 Coolify 加入該 VM 作為可管理的 server 前，需先配置並驗證 SSH。請保護具 sudo 權限的管理帳號與 key。將 VM relay 範本部署到該 VM，並依實際 Lima 網路設定 `MODEL_HOST_IP`；確認 relay 指向的 host gateway 不是 VM 本身的 loopback。在 VM 執行以下指令後，檢查 Serve 的狀態與 ACL：
+
+```sh
+sudo tailscale serve --bg --tcp=18124 tcp://localhost:18125
+sudo tailscale serve status
+tailscale status
+```
+
+再把 VPS relay 範本部署到 Coolify，設定 VM 的 tailnet IPv4 為 `TAILNET_TARGET_IP`。在 Coolify 中把 Dashboard 與 relay 接到同一個 Docker 網路，使用 Coolify 實際產生的 relay 容器名稱建立 `UPSTREAM_BASE_URL`。不要直接複用別台機器的 IP、SSH bridge 或秘密；最終連線必須實測。
 
 ## 2. 安全搬遷 Dashboard
 

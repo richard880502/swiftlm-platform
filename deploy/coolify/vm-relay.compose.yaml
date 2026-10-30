@@ -1,0 +1,10 @@
+services:
+  host-relay:
+    image: alpine/socat:1.8.0.3
+    network_mode: host
+    command:
+      - -d
+      - -d
+      - TCP-LISTEN:18125,bind=127.0.0.1,reuseaddr,fork
+      - TCP:${MODEL_HOST_IP:?Set the private Lima host gateway IP}:${MODEL_GATEWAY_PORT:-18124}
+    restart: unless-stopped
