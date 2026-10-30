@@ -1,6 +1,6 @@
 # SwiftLM Platform
 
-這是一個完整的本機 LLM API 平台：本機 Apple Silicon 負責模型推理，Zeabur Wonder Mesh 提供外網連線，Dashboard 負責客戶 API key、聊天、使用紀錄與模型機器狀態。
+這是一個本機 LLM API 平台：本機機器負責模型推理，Dashboard 負責客戶 API key、聊天、使用紀錄與模型機器狀態。可透過 Zeabur Wonder Mesh 或自行管理的 Coolify VPS 與 Tailscale 連接外網。
 
 本機模型使用 SwiftLM 的 SSD expert streaming 執行：
 
@@ -113,6 +113,10 @@ Markdown renderer 只套用在 assistant 訊息，使用者輸入仍維持原始
 [本機 API 透過 Zeabur Wonder Mesh 對外服務](docs/wonder-mesh-local-api.md)
 
 Dashboard 的開發與部署方式請見 [dashboard/README.md](dashboard/README.md)。
+
+## Coolify 與 Tailscale
+
+自架 VPS 的架構、資料遷移、安全設定與驗證步驟見 [Coolify 本機 API 發布與搬遷](docs/coolify-tailscale-local-api.md)。Coolify 的反向代理處理網域與 TLS，Dashboard 處理節點 key 與 API 路由；模型仍在各自的本機機器執行。既有節點的上游連線必須逐一遷移，搬移 Dashboard 不會自動把其他機器加入 tailnet。
 
 ## 多機器 Dashboard
 

@@ -1,0 +1,57 @@
+# Coolify + Tailscale：將本機模型提供成公開 API
+
+此架構將公開入口放在 Coolify VPS，推理仍在本機完成。下圖的 VM 是網路與 relay 節點，不需要載入模型。
+
+```mermaid
+flowchart LR
+    Client[API client] -->|HTTPS + node API key| Proxy[Coolify Proxy / TLS]
+    Proxy --> Dashboard[Dashboard / 驗證與路由]
+    subgraph VPS[Coolify VPS]
+      Dashboard --> Relay[VPS relay]
+      Relay --> TS1[Tailscale egress]
+    end
+    TS1 <-->|tailnet 加密連線| TS2[Lima VM Tailscale]
+    subgraph Mac[模型主機]
+      TS2 --> Serve[Tailscale Serve / VM relay]
+      Serve --> Gateway[MLX Gateway]
+      Gateway --> Engine[SwiftLM]
+    end
+```
+
+本部署使用 Coolify 既有 Traefik 處理 HTTPS，不必額外啟動 Caddy；Caddy 也可以擔任反向代理，但單純轉送不會取代 Dashboard 的 API key 驗證。其他平台或 Tailscale 版本的設定需重新驗證。
+
+## 1. 準備與連線
+
+1. 準備可管理 Docker 的 Coolify VPS、可指向 VPS 的 DNS 名稱，以及 TCP 80/443 的防火牆規則。Coolify 每個服務需設定正確的容器 port，並確認 TLS 憑證有效。
+2. 在本機啟動推理服務與 Gateway，確保 Gateway 需要上游 key；模型的 loopback 位址不等於 VM 的 loopback，須確認 VM 可透過受保護的 host gateway 存取。
+3. 建立獨立 Lima VM，安裝 Docker 與 Tailscale，將它和 VPS 的 Tailscale egress 加入同一個 tailnet。此部署採用 VPS 的 TUN 模式；不同環境若只支援 userspace，必須額外規劃 proxy，不可假設系統路由會自動生效。
+4. 使用 VM 上的 Tailscale Serve 與只綁在 VM loopback 的 relay，轉送到主機 Gateway；在 VPS 建立只供內部 Docker 網路使用的 relay，讓 Dashboard 指向該 relay 的 `/v1`。兩端 Tailscale 網路和 port 應以 tailnet policy 限制，避免公開未驗證的 origin。
+5. 若 Coolify 透過該 VM 的 SSH bridge 管理它，VPS egress 或 bridge 一旦停止，Coolify 也會失去 VM 管理連線。先保留 `limactl shell <vm>` 的復原方式，再操作 bridge。
+
+## 2. 安全搬遷 Dashboard
+
+Dashboard 使用 SQLite。先在來源建立 SQLite 一致性備份並驗證 `PRAGMA integrity_check`，再以完整雜湊檢查傳送後的備份，禁止只複製運作中的資料庫主檔而忽略 WAL。備份包含敏感資料，應限制讀寫權限、加密並保留可恢復副本。
+
+在目標建立 `/data` 持久儲存，再匯入備份。保留原先 `KEY_HASH_SECRET` 才能驗證既有 client keys，也才能解密各節點已保存的上游憑證；保留 `SESSION_SECRET` 和管理員密碼以維持管理設定。憑證只能放在 Coolify secret 環境變數中，不可提交到 Git、印到 log 或傳給 client。預設節點的 `DEFAULT_NODE_ID` 必須維持舊值，避免既有資料和 key 指向錯誤節點；`UPSTREAM_BASE_URL` 指向新的私有 relay。
+
+在切換以前先比較來源與備份的資料，並在必要時協調短暫停止舊端寫入、做最後一次同步。舊端持續寫入時，初次備份只代表某一時間點；新舊兩端不可長期當成同一份同步資料庫使用。保留來源與備份作為回復手段，不要在驗證前刪除。
+
+## 3. 對外 API
+
+Dashboard 保留 `/v1`；也可針對特定機器使用 `/nodes/<node-id>/v1`。管理介面的機器頁顯示對應 Base URL。`DEFAULT_NODE_ROUTE_ALIAS` 可替預設節點設定易讀別名，不會改動其資料庫 ID。各 key 只可存取所屬節點與其登記的模型；單節點多模型使用 JSON 的 `model` 欄位指定。
+
+```sh
+curl -N "$API_BASE_URL/chat/completions" \
+  -H "Authorization: Bearer $DASHBOARD_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"YOUR_MODEL_ID","messages":[{"role":"user","content":"你好"}],"stream":true,"max_tokens":128}'
+```
+
+`API_BASE_URL` 例如 `https://YOUR_DOMAIN/nodes/mac-mini/v1`。不要把 key 寫入 Git、文件或公開 log。此版本的節點路由支援 `/models` 與 `/chat/completions`，不是所有 OpenAI API 端點。
+
+## 4. 驗證與新增節點
+
+- 檢查 DNS、有效的 TLS、Dashboard health、管理員登入與資料數量；重啟服務後再次檢查資料仍存在。
+- 測試無 key／錯誤 key 為 401、其他節點的 key 為 403、正確 key 可列出模型和完成生成；以 `stream: true` 確認 SSE 區塊即時送達。
+- 確認 tailnet 中斷、模型關閉、VM／VPS 重新啟動後的恢復方式，並保留離線錯誤而非繞過驗證。
+- 新增機器時，為該機器建立自己的私有連線與受驗證上游，在 Dashboard 登記 origin、provider、模型和憑證，再發行綁定該節點的 client key。搬遷 Dashboard 不會自動搬走已登記的其他 Zeabur proxy，需逐台驗證與調整。

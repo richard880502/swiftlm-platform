@@ -1,6 +1,6 @@
 # SwiftLM Dashboard
 
-Dashboard 是平台的公開 API gateway 與管理介面，部署在 Zeabur Tencent Tokyo。模型權重不在這個服務中；推理一律經由 private transport 回到對應的節點機器——預設節點是透過 SwiftLM origin、Wonder Mesh 與 relay 連回本機 Mac。
+Dashboard 是平台的公開 API gateway 與管理介面，可部署在 Zeabur 或 Coolify。模型權重不在這個服務中；推理經由各節點配置的 origin 回到對應機器。Coolify 與 Tailscale 部署流程見 [Coolify 本機 API 發布與搬遷](../docs/coolify-tailscale-local-api.md)。
 
 ## 功能
 
@@ -13,7 +13,7 @@ Dashboard 是平台的公開 API gateway 與管理介面，部署在 Zeabur Tenc
 - 手機版介面：底部主要導覽、最近對話抽屜、safe area 與窄螢幕表單／聊天排版。
 - 模型機器頁面：每 5 秒確認每個節點的模型在線狀態，並可偵測節點的 inference backend。
 - API request、token、token/s、TTFT、排隊時間、延遲、機器、模型與內容 preview 紀錄。
-- SQLite 持久化，Zeabur volume 掛載於 `/data`。
+- SQLite 持久化，部署時需將 volume 掛載於 `/data`。
 
 ## 本機開發
 
@@ -46,13 +46,14 @@ DEFAULT_NODE_NAME
 DATA_DIR=/data
 ```
 
-目前 upstream 必須是：
+舊 Zeabur 部署的預設 upstream 是：
 
 ```text
 https://richard-swiftlm-origin-7165.zeabur.app/v1
 ```
 
 不得設為 client-facing `richard-swiftlm.zeabur.app`，否則會形成代理迴圈。
+Coolify 部署應改為其私有 relay 的 `/v1` 位址，也不可指回 Dashboard 自己的公開網址。
 
 ## 機器與 API Key
 
