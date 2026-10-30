@@ -35,6 +35,7 @@ async function startDashboard({ port, upstreamBaseUrl }) {
       UPSTREAM_BASE_URL: upstreamBaseUrl,
       UPSTREAM_API_KEY: "swiftlm-master-key",
       DEFAULT_NODE_ID: "mac-mini",
+      DEFAULT_NODE_ROUTE_ALIAS: "default-host",
       MODEL_ID: "default-model",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -84,7 +85,7 @@ async function adminCookie(base) {
 test("a node serving two models routes each request to the model the client asked for", { timeout: 20_000 }, async (t) => {
   const receivedModels = [];
   const backend = http.createServer(async (request, response) => {
-    if (request.url === "/v1/models") {
+    if (request.url.endsWith("/v1/models")) {
       response.writeHead(200, { "content-type": "application/json" });
       return response.end(JSON.stringify({ object: "list", data: [] }));
     }
@@ -106,7 +107,7 @@ test("a node serving two models routes each request to the model the client aske
   const backendPort = await listen(backend);
   t.after(() => backend.close());
 
-  const dashboard = await startDashboard({ port: 18501, upstreamBaseUrl: "http://127.0.0.1:1/v1" });
+  const dashboard = await startDashboard({ port: 18501, upstreamBaseUrl: `http://127.0.0.1:${backendPort}/default/v1` });
   t.after(() => dashboard.stop());
   const cookie = await adminCookie(dashboard.base);
 
@@ -144,6 +145,16 @@ test("a node serving two models routes each request to the model the client aske
   assert.equal(wrongNode.response.status, 403);
   const missingKey = await call(dashboard.base, `/nodes/${nodeId}/v1/models`);
   assert.equal(missingKey.response.status, 401);
+  const wrongAlias = await call(dashboard.base, "/nodes/mac-mini/v1/models", { token: key.json.key });
+  assert.equal(wrongAlias.response.status, 403);
+  const rejectedAlias = await call(dashboard.base, "/nodes/default-host/v1/models", { token: key.json.key });
+  assert.equal(rejectedAlias.response.status, 403);
+  const defaultKey = await call(dashboard.base, "/api/keys", {
+    method: "POST", cookie, body: { name: "default node", node_id: "mac-mini" },
+  });
+  const defaultModels = await call(dashboard.base, "/nodes/default-host/v1/models", { token: defaultKey.json.key });
+  assert.equal(defaultModels.response.status, 200);
+  assert.equal(defaultModels.json.data[0].id, "default-model");
 
   const clientModels = await call(dashboard.base, "/v1/models", { token: key.json.key });
   assert.deepEqual(clientModels.json.data.map((m) => m.id).sort(), ["model-a", "model-b"]);

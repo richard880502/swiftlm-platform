@@ -820,7 +820,7 @@ function renderNodeRow(node) {
             <span class="state-label ${node.status?.state === "online" ? "active" : ""}">${stateName}</span>
           </div>
           ${renderModelChips(node)}
-          <small>API Base URL：${escapeHtml(`${location.origin}/nodes/${encodeURIComponent(node.id)}/v1`)}</small>
+          <small>API Base URL：${escapeHtml(`${location.origin}/nodes/${encodeURIComponent(node.api_route_id || node.id)}/v1`)}</small>
           <small>最後檢查 ${formatDate(node.status?.checked_at)} · ${latency} · ${escapeHtml(AUTH_TYPE_LABELS[node.auth_type] || node.auth_type || "bearer")}</small>
         </div>
         <div class="node-actions">

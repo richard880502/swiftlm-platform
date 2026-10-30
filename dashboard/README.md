@@ -93,4 +93,6 @@ Dashboard 會根據 Key 的 `node_id` 轉送到正確 Origin，並拒絕不屬�
 
 也可以使用節點專屬的 OpenAI 相容 Base URL：`https://<dashboard-domain>/nodes/<node-id>/v1`。在「機器」頁面可查看每個節點的完整網址；同一節點提供多個模型時，仍在請求的 `model` 欄位選擇模型。Dashboard 會檢查 API key 是否屬於網址指定的節點，對不匹配的 key 回傳 403；原本的 `/v1` 仍可使用。
 
+可透過 `DEFAULT_NODE_ROUTE_ALIAS` 替預設節點設定網址別名，例如 `mac-mini`；這不會變更資料庫中舊的節點 ID 或既有 API keys。別名不可與其他節點的 ID 衝突。其他節點仍使用其 ID。
+
 完整網路架構與 Wonder Mesh 重建流程請見 [../docs/wonder-mesh-local-api.md](../docs/wonder-mesh-local-api.md)。

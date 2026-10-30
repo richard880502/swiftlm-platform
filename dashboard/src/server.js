@@ -47,6 +47,10 @@ const store = createStore(config.databasePath, {
   // Reuse the existing server-only secret to encrypt per-node Origin API keys at rest.
   nodeSecret: config.keyHashSecret,
 });
+if (config.defaultNodeRouteAlias && config.defaultNodeRouteAlias !== config.defaultNode.id
+    && store.getNode(config.defaultNodeRouteAlias)) {
+  throw new Error("DEFAULT_NODE_ROUTE_ALIAS conflicts with an existing node ID");
+}
 const app = express();
 const publicDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../public");
 const loginAttempts = new Map();
@@ -200,6 +204,7 @@ async function nodeWithStatus(node) {
     ...node,
     capabilities: capabilitiesFor(node),
     is_default: node.id === config.defaultNode.id,
+    api_route_id: node.id === config.defaultNode.id ? (config.defaultNodeRouteAlias || node.id) : node.id,
     usage: store.getNodeUsage(node.id),
     status: await checkNode(node),
     models: store.listNodeModels(node.id),
@@ -760,7 +765,9 @@ app.all("/v1/chat/completions", requireApiKey, (req, res) => {
 });
 for (const route of ["/models", "/chat/completions"]) {
   app.all(`/nodes/:nodeId/v1${route}`, requireApiKey, (req, res) => {
-    if (req.params.nodeId !== req.dashboardApiKey.node_id) {
+    const matchesDefaultAlias = config.defaultNodeRouteAlias && req.params.nodeId === config.defaultNodeRouteAlias
+      && req.dashboardApiKey.node_id === config.defaultNode.id;
+    if (req.params.nodeId !== req.dashboardApiKey.node_id && !matchesDefaultAlias) {
       return res.status(403).json({ error: {
         message: "API key is not authorized for this node",
         type: "permission_error",

@@ -32,6 +32,8 @@ export function loadConfig() {
     upstreamBaseUrl: required("UPSTREAM_BASE_URL").replace(/\/$/, ""),
     upstreamApiKey: required("UPSTREAM_API_KEY"),
     modelId,
+    defaultNodeRouteAlias: process.env.DEFAULT_NODE_ROUTE_ALIAS?.trim()
+      ? nodeIdFromEnv("DEFAULT_NODE_ROUTE_ALIAS", "") : null,
     defaultNode: {
       id: nodeIdFromEnv("DEFAULT_NODE_ID", "richard-macbook-air"),
       // Keep the historical node ID stable so existing keys and conversations keep routing correctly.
