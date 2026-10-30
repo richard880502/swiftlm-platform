@@ -6,6 +6,20 @@
 
 `majentik/Qwen3.6-35B-A3B-TurboQuant-MLX-4bit`
 
+## v2.1.0
+
+- 對話生成時輸入框保持可用；按 Enter 或右下角的「＋」可將下一則訊息加入 FIFO 待送列隊（最多 20 則）。模型推理仍維持單一請求，避免不同對話的 KV cache 或串流內容互相干擾。
+- Markdown 串流改為「完成區塊才渲染」：完整段落、清單與已關閉的程式碼區塊立即轉為富文字，尚未完成的尾端仍以純文字顯示，兼顧閱讀即時性與行動裝置效能。
+
+## v2.0.0
+
+- Dashboard 改為完整的手機優先介面：底部導覽、最近對話抽屜、安全區域支援與窄螢幕聊天／表單排版。
+- 長篇串流回覆會以每個畫面影格一次的純文字更新，完成後才進行 Markdown 渲染，避免行動裝置因反覆重排而卡住。
+- 對話可在非生成期間切換已註冊的機器或模型；既有歷史會保留，下一次回答才使用新的目標。
+- GitHub Actions 會自動執行 Dashboard 與 MLX Gateway 測試。
+
+感謝 [@yenhao-huang](https://github.com/yenhao-huang) 更新手機版介面與行動裝置使用體驗。
+
 ## 最簡單的用法
 
 ```zsh
@@ -49,6 +63,33 @@ Client API 使用 Dashboard 產生的 `sk-mlx-...` key。Origin 只供 Dashboard
 - `deploy/wondermesh/`：Wonder Mesh relay 部署檔。
 - `.state/`：PID 與後台日誌。
 
+## Dashboard Markdown 顯示
+
+Dashboard 的聊天介面支援將模型輸出的 Markdown 即時渲染成接近一般 AI Chat 介面的排版，而不是直接顯示原始 `#`、`**`、三個反引號或表格符號。
+
+目前支援：
+
+- `#` 到 `######` 標題
+- 粗體、斜體、刪除線
+- 有序與無序清單
+- Task list
+- Blockquote 與水平分隔線
+- Inline code
+- Fenced code block 與語言標籤
+- 程式碼區塊複製按鈕
+- Markdown table
+- 安全連結
+
+Markdown renderer 只套用在 assistant 訊息，使用者輸入仍維持原始文字。既有 SSE / streaming 流程沒有被替換；串流內容仍以畫面影格為單位合併更新，但完整段落、清單與已關閉的 fenced code block 會先完成一次 Markdown 渲染，未完成的尾端則維持純文字。這避免每個 token 反覆解析整段訊息與重建 DOM，同時不用等整份回答完成才看到格式化內容。
+
+實作維持 Dashboard 原本的原生 ES module / no-build-step 架構，不依賴外部 CDN，也沒有為此加入 React、Vite 或額外的 npm frontend dependency：
+
+- `dashboard/public/markdown-enhancer.js`：Markdown parser、完成後的單則訊息渲染、code copy handling 與安全連結處理。
+- `dashboard/public/markdown.css`：標題、列表、引用、表格與 code block 等聊天內容樣式。
+- `dashboard/public/index.html`：載入上述 Markdown assets。
+
+安全上不直接執行模型回傳的 HTML，且連結只允許 `http:`、`https:`、`mailto:`、站內相對路徑與 `#` anchor；外部連結使用 `noopener noreferrer`。
+
 ## 兩種日誌
 
 ```zsh
@@ -88,8 +129,9 @@ flowchart LR
 
 - 管理員在 Dashboard 的「機器」加入機器名稱、backend、模型、節點 `/v1` URL 與驗證方式。「偵測 backend 與模型」會以一次 `/models` 請求判斷 backend 並帶出該節點已提供的模型。
 - Dashboard 每 5 秒以 `/models` 檢查各節點是否在線；驗證方式為「無驗證」的私有節點不需要上游 API Key。
-- 建立 API Key 時必須選擇機器；Key 只能呼叫該機器登記的模型。Client 只使用 Dashboard 發行的 `sk-mlx-*` key，不需要知道背後是哪一種 backend。
-- 新對話可在尚未送出第一則訊息前選擇機器和模型；送出後固定目標，避免對話內容跨機器混用。
+- 一個節點（一個 endpoint）可以註冊多個模型，適合 vLLM 新版、Ollama、LM Studio 這類本身就能用 `model` 欄位切換模型的 backend；同一部主機若用不同 port 各跑一個獨立推理 process，仍要登記成不同節點。
+- 建立 API Key 時必須選擇機器；Key 可以呼叫該機器登記的所有已啟用模型。Client 只使用 Dashboard 發行的 `sk-mlx-*` key，不需要知道背後是哪一種 backend。
+- 對話可在沒有生成中的請求時切換機器和模型；既有訊息會原樣保留，只有下一次回答改由新目標生成。每筆 request 都會記錄實際使用的機器與模型。
 - API request 與對話會保存 `node_id`、模型與狀態，方便從使用紀錄追查。
 
 上游憑證不會顯示給 Dashboard 使用者；預設 Mac mini 的 key 仍位於 Keychain 與 Dashboard 的 Zeabur secret environment variable，額外節點的憑證則只會加密保存於 Dashboard 的持久化資料庫，且預設節點的 master key 不會被借給任何其他節點。

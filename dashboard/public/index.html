@@ -6,7 +6,8 @@
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#17191d" />
     <title>SwiftLM Console</title>
-    <link rel="stylesheet" href="/styles.css?v=4" />
+    <link rel="stylesheet" href="/styles.css?v=5" />
+    <link rel="stylesheet" href="/markdown.css?v=2" />
   </head>
   <body>
     <div class="wallpaper" aria-hidden="true">
@@ -35,7 +36,7 @@
     </main>
 
     <main id="appView" class="app-window liquid-glass hidden">
-      <aside class="sidebar">
+      <aside id="conversationDrawer" class="sidebar">
         <div class="brand-row">
           <div class="brand-glyph" aria-hidden="true">S</div>
           <div>
@@ -85,8 +86,20 @@
         </div>
       </aside>
 
+      <button id="drawerBackdrop" class="drawer-backdrop hidden" type="button" aria-label="關閉最近對話"></button>
+
       <section class="workspace">
         <header class="topbar">
+          <button
+            id="mobileConversationButton"
+            class="mobile-conversation-button"
+            type="button"
+            aria-label="開啟最近對話"
+            aria-controls="conversationDrawer"
+            aria-expanded="false"
+          >
+            <span aria-hidden="true"></span>
+          </button>
           <div class="topbar-copy">
             <p id="viewEyebrow" class="eyebrow">CONVERSATIONS</p>
             <h2 id="viewTitle">對話</h2>
@@ -143,7 +156,11 @@
                     </select>
                   </label>
                 </div>
-                <button id="sendButton" class="send-button" type="submit" aria-label="傳送">↑</button>
+                <div class="composer-actions">
+                  <span id="queueStatus" class="queue-status" aria-live="polite" hidden></span>
+                  <button id="queueButton" class="queue-button" type="button" aria-label="加入待送" title="加入待送" hidden>＋</button>
+                  <button id="sendButton" class="send-button" type="submit" aria-label="傳送">↑</button>
+                </div>
               </div>
             </form>
           </section>
@@ -235,9 +252,28 @@
           </div>
         </section>
       </section>
+
+      <nav class="mobile-navigation" aria-label="手機主要功能">
+        <button class="nav-button active" data-view="chat">
+          <span class="nav-icon chat-icon" aria-hidden="true"></span>
+          <span>對話</span>
+        </button>
+        <button class="nav-button" data-view="activity">
+          <span class="nav-icon activity-icon" aria-hidden="true"></span>
+          <span>紀錄</span>
+        </button>
+        <button class="nav-button" data-view="keys">
+          <span class="nav-icon key-icon" aria-hidden="true"></span>
+          <span>Keys</span>
+        </button>
+        <button class="nav-button" data-view="nodes">
+          <span class="nav-icon node-icon" aria-hidden="true"></span>
+          <span>機器</span>
+        </button>
+      </nav>
     </main>
 
     <div id="toast" class="toast hidden" role="status"></div>
-    <script type="module" src="/app.js?v=12"></script>
+    <script type="module" src="/app.js?v=14"></script>
   </body>
 </html>

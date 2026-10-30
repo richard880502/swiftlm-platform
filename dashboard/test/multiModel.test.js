@@ -216,9 +216,24 @@ test("a conversation targeting a node's second model sends that model, not the n
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.deepEqual(receivedModels, ["model-b"], "the conversation's own model must reach upstream, not the node's default");
 
+  // Keep the existing chat as context, but route future turns through the
+  // model the user selected later in the same conversation.
+  const retargeted = await call(dashboard.base, `/api/conversations/${conversation.json.id}/target`, {
+    method: "PATCH", cookie, body: { node_id: nodeId, model_id: "model-a" },
+  });
+  assert.equal(retargeted.response.status, 200);
+  assert.equal(retargeted.json.model_id, "model-a");
+  assert.equal(retargeted.json.messages.length, 2, "changing model must not discard chat history");
+
+  await call(dashboard.base, `/api/conversations/${conversation.json.id}/messages`, {
+    method: "POST", cookie, body: { content: "use the other model" },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.deepEqual(receivedModels, ["model-b", "model-a"], "the next turn must use the newly selected model");
+
   const activity = await call(dashboard.base, "/api/activity", { cookie });
-  const row = activity.json.data.find((r) => r.route === "/api/conversations/:id/messages");
-  assert.equal(row.model, "model-b", "activity history must record the model actually used");
+  const chatRows = activity.json.data.filter((r) => r.route === "/api/conversations/:id/messages");
+  assert.deepEqual(chatRows.map((row) => row.model).sort(), ["model-a", "model-b"], "activity history must record the model actually used");
 
   // A conversation cannot be created against a model the node doesn't have.
   const invalid = await call(dashboard.base, "/api/conversations", {
