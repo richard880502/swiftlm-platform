@@ -91,6 +91,11 @@ test("a node serving two models routes each request to the model the client aske
     const raw = await readBody(request);
     const body = JSON.parse(raw);
     receivedModels.push(body.model);
+    if (body.stream) {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write('data: {"choices":[{"delta":{"content":"hello"}}]}\n\n');
+      return response.end('data: [DONE]\n\n');
+    }
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
       id: "chatcmpl-1",
@@ -132,6 +137,14 @@ test("a node serving two models routes each request to the model the client aske
 
   const key = await call(dashboard.base, "/api/keys", { method: "POST", cookie, body: { name: "test", node_id: nodeId } });
 
+  const scopedModels = await call(dashboard.base, `/nodes/${nodeId}/v1/models`, { token: key.json.key });
+  assert.equal(scopedModels.response.status, 200);
+  assert.deepEqual(scopedModels.json.data.map((m) => m.id).sort(), ["model-a", "model-b"]);
+  const wrongNode = await call(dashboard.base, "/nodes/mac-mini/v1/models", { token: key.json.key });
+  assert.equal(wrongNode.response.status, 403);
+  const missingKey = await call(dashboard.base, `/nodes/${nodeId}/v1/models`);
+  assert.equal(missingKey.response.status, 401);
+
   const clientModels = await call(dashboard.base, "/v1/models", { token: key.json.key });
   assert.deepEqual(clientModels.json.data.map((m) => m.id).sort(), ["model-a", "model-b"]);
 
@@ -141,12 +154,29 @@ test("a node serving two models routes each request to the model the client aske
   assert.equal(replyA.response.status, 200);
   assert.match(replyA.json.choices[0].message.content, /model-a/);
 
+  const scopedReply = await call(dashboard.base, `/nodes/${nodeId}/v1/chat/completions`, {
+    method: "POST", token: key.json.key, body: { model: "model-b", messages: [{ role: "user", content: "hi" }] },
+  });
+  assert.equal(scopedReply.response.status, 200);
+  assert.match(scopedReply.json.choices[0].message.content, /model-b/);
+
+  const scopedStream = await call(dashboard.base, `/nodes/${nodeId}/v1/chat/completions`, {
+    method: "POST", token: key.json.key, body: { model: "model-a", messages: [], stream: true },
+  });
+  assert.equal(scopedStream.response.status, 200);
+  assert.match(scopedStream.text, /hello/);
+  assert.match(scopedStream.text, /\[DONE\]/);
+  const wrongNodeReply = await call(dashboard.base, "/nodes/mac-mini/v1/chat/completions", {
+    method: "POST", token: key.json.key, body: { model: "model-a", messages: [] },
+  });
+  assert.equal(wrongNodeReply.response.status, 403);
+
   const replyB = await call(dashboard.base, "/v1/chat/completions", {
     method: "POST", token: key.json.key, body: { model: "model-b", messages: [{ role: "user", content: "hi" }] },
   });
   assert.equal(replyB.response.status, 200);
   assert.match(replyB.json.choices[0].message.content, /model-b/);
-  assert.deepEqual(receivedModels, ["model-a", "model-b"], "each request must reach upstream with the model actually requested");
+  assert.deepEqual(receivedModels, ["model-a", "model-b", "model-a", "model-b"], "each request must reach upstream with the model actually requested");
 
   const rejected = await call(dashboard.base, "/v1/chat/completions", {
     method: "POST", token: key.json.key, body: { model: "model-c", messages: [] },

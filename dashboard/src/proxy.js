@@ -263,9 +263,9 @@ export async function streamDashboardChat({
   }
 }
 
-export async function proxyOpenAI({ config, req, res, apiKey, store }) {
+export async function proxyOpenAI({ config, req, res, apiKey, store, routeOverride }) {
   const started = Date.now();
-  const route = req.path.replace(/^\/v1/, "") || "/";
+  const route = routeOverride ?? (req.path.replace(/^\/v1/, "") || "/");
   const body = req.method === "GET" ? undefined : req.body;
   const stream = Boolean(body?.stream);
   let status = 502;

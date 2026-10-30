@@ -758,6 +758,18 @@ app.all("/v1/models", requireApiKey, (req, res) => {
 app.all("/v1/chat/completions", requireApiKey, (req, res) => {
   proxyOpenAI({ config, req, res, apiKey: req.dashboardApiKey, store });
 });
+for (const route of ["/models", "/chat/completions"]) {
+  app.all(`/nodes/:nodeId/v1${route}`, requireApiKey, (req, res) => {
+    if (req.params.nodeId !== req.dashboardApiKey.node_id) {
+      return res.status(403).json({ error: {
+        message: "API key is not authorized for this node",
+        type: "permission_error",
+        code: "node_access_denied",
+      } });
+    }
+    return proxyOpenAI({ config, req, res, apiKey: req.dashboardApiKey, store, routeOverride: route });
+  });
+}
 
 // The dashboard is a single-page app. Revalidate assets on every reload so a
 // deployed UI fix is never hidden behind an hour of browser cache.
